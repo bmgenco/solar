@@ -59,10 +59,15 @@ wd <- dirname(r_scriptwd)  # solar/scripts/ → solar/
 knitr::opts_knit$set(root.dir = wd)
 
 # Set relative directories from solar/
-data_dir <- "data"
-ecobee_dir <- file.path(data_dir, "ecobee")
-output_dir <- "output"
-fig_dir <- "figures"
+# data_dir <- "data"
+# ecobee_dir <- file.path(data_dir, "ecobee")
+# output_dir <- "output"
+# fig_dir <- "figures"
+
+data_dir <- file.path(wd, "data")
+ecobee_dir <- file.path(wd, "data", "ecobee")
+output_dir <- file.path(wd, "output")
+fig_dir <- file.path(wd, "figures")
 
 # Create directories if they don't exist
 if(!dir.exists(output_dir)) dir.create(output_dir)
@@ -166,11 +171,15 @@ function_variables$installer_system <- list(
   # Battery system (included in design)
   battery_included = TRUE,
   battery_model = "IQBATTERY-5P-1P-NA", # Enphase 5P battery
-  battery_capacity_kwh = 5.0,
-  battery_output_kw = 3.84,
+  # battery_capacity_kwh = 5.0,
+  battery_capacity_kwh = 10.0,
+  battery_usable_capacity_kwh = 8.5,
+  # battery_output_kw = 3.84, # single battery
+  battery_output_kw = 7.68,  # 2x 3.84kW continuous (parallel operation)
   battery_cost = 11349, # $
   battery_mode = "energy_arbitrage", # Time-of-use optimization
-  battery_backup_allocation = 0, # % (configured for arbitrage, not backup)
+  # battery_backup_allocation = 0, # % (configured for arbitrage, not backup)
+  battery_backup_allocation = 15,  # % minimum SOC for cold weather safety (LFP temp margin)
   
   # Roof placement
   roof_orientation = "west_southwest", # From aerial photo
