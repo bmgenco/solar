@@ -1,0 +1,628 @@
+---
+title: "Financial & Emissions Components - Solar/Heat Pump Decision Framework"
+subtitle: "2265 Ridgedale Road - ROI Analysis with Solar Energy Partners Quote"
+author: "Three-Component Decision Framework"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+<!--
+FINANCIAL & EMISSIONS DECISION ANALYSIS - COMPONENTS 2 & 3
+================================================================================
+Property: 2265 Ridgedale Road, Decatur GA
+Current Date: September 2025
+Timeline Critical: 30% federal tax credit expires 12/31/2025
+Installer: Solar Energy Partners LLC (Cole Chappell)
+System: 6.6kW SunPower Maxeon with 5kWh Enphase battery
+
+KEY PARAMETERS:
+- Total project cost: $41,149 (after $1,000 discount)
+- Federal tax credit: $12,345 (30%)
+- Net cost: $28,804
+- Annual production: 6,522 kWh
+- Move-out variable: 1-10 years for sensitivity analysis
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Clear environment
+rm(list=ls())
+
+# Set working directory relative to .Rmd location
+r_scriptwd <- getwd()
+wd <- dirname(r_scriptwd)  # solar/scripts/ → solar/
+knitr::opts_knit$set(root.dir = wd)
+
+# Set relative directories from solar/
+data_dir <- "data"
+ecobee_dir <- file.path(data_dir, "ecobee")
+output_dir <- "output"
+fig_dir <- "figures"
+
+
+# Package management
+packages <- c("tidyverse", "lubridate", "plotly", "DT", "kableExtra", 
+              "scales", "RColorBrewer")
+new.packages <- packages[!(packages %in% installed.packages()[, "Package"])]
+if(length(new.packages)) install.packages(new.packages)
+lapply(packages, library, character.only = TRUE)
+
+
+```
+
+
+```{r}
+# Load house profile from Component 1
+load("output/house_profile.RData")
+
+# Validate data load
+if(!exists("house_profile")) {
+  stop("house_profile.RData not found. Run House Component analysis first.")
+}
+
+# Extract installer data for easy reference
+installer <- house_profile$solar_recommendations
+```
+
+# 1. Financial Component - Economic Analysis with Actual Quote
+
+## 1.1 Cost Parameters - Solar Energy Partners Quote
+
+```{r cost_parameters}
+# Define costs using actual installer quote
+cost_bounds <- list(
+  # Solar system - Solar Energy Partners actual quote
+  solar = list(
+    # Actual costs from quote
+    gross_cost = 41149,     # Total before tax credit
+    tax_credit = 12345,     # 30% federal credit
+    net_cost = 28804,       # Net cost after credit
+    system_size_kw = 6.6,   # System size
+    
+    # Cost per watt analysis
+    gross_per_watt = 41149 / 6600,  # $6.23/W
+    net_per_watt = 28804 / 6600,    # $4.37/W
+    
+    # Bounds for sensitivity analysis
+    lower = 28804 * 0.9,    # 10% below quote
+    median = 28804,         # Actual quote
+    upper = 28804 * 1.15,   # 15% above quote
+    
+    source = "Solar Energy Partners LLC - September 2025 Quote"
+  ),
+  
+  # Battery - Included in solar quote
+  battery = list(
+    included = TRUE,
+    model = "Enphase IQ Battery 5P",
+    capacity_kwh = 5.0,
+    standalone_cost = 11349,  # If purchased separately
+    source = "Included in solar system quote"
+  ),
+  
+  # Heat pump water heater - Industry estimates
+  hpwh = list(
+    lower = 3500,
+    median = 4500,
+    upper = 6000,
+    source = "Energy Star database 2025"
+  ),
+  
+  # Heat pump HVAC - Industry estimates
+  hp_hvac = list(
+    lower = 12000,
+    median = 15000,
+    upper = 20000,
+    source = "ACCA contractor estimates"
+  )
+)
+
+# Federal tax credit parameters
+tax_credit <- list(
+  rate_2025 = 0.30,
+  expires = as.Date("2025-12-31"),
+  days_remaining = as.numeric(as.Date("2025-12-31") - Sys.Date()),
+  qualified_items = c("solar", "battery", "electrical_upgrade")
+)
+
+# Utility rate parameters
+utility_rates <- list(
+  current_rate = 0.12,           # $/kWh
+  annual_escalation_low = 0.02,  # 2% per year
+  annual_escalation_mid = 0.04,  # 4% per year  
+  annual_escalation_high = 0.07, # 7% per year
+  time_of_use_differential = 0.05, # $/kWh peak vs off-peak
+  solar_offset_percentage = 0.70  # % of bill that can be offset
+)
+
+# Display key financial parameters
+cat("=== SOLAR ENERGY PARTNERS QUOTE SUMMARY ===\n")
+cat("System size: 6.6 kW (15 panels @ 440W)\n")
+cat("Total cost: $", format(cost_bounds$solar$gross_cost, big.mark=","), "\n")
+cat("Tax credit (30%): -$", format(cost_bounds$solar$tax_credit, big.mark=","), "\n")
+cat("Net cost: $", format(cost_bounds$solar$net_cost, big.mark=","), "\n")
+cat("Cost per watt (net): $", round(cost_bounds$solar$net_per_watt, 2), "/W\n")
+cat("Days until tax credit expires:", tax_credit$days_remaining, "\n")
+```
+
+## 1.2 NPV and Payback Analysis
+
+```{r npv_calculations}
+# NPV calculation function with actual costs
+calculate_npv <- function(upgrades = c("solar"),
+                         move_out_year = 10,
+                         rate_escalation = 0.04,
+                         discount_rate = 0.05) {
+  
+  # Calculate initial investment
+  initial_cost <- 0
+  
+  if("solar" %in% upgrades) {
+    initial_cost <- initial_cost + cost_bounds$solar$net_cost
+  }
+  if("hpwh" %in% upgrades) {
+    initial_cost <- initial_cost + cost_bounds$hpwh$median
+  }
+  if("hp_hvac" %in% upgrades) {
+    initial_cost <- initial_cost + cost_bounds$hp_hvac$median
+  }
+  
+  # Calculate annual savings
+  annual_savings <- 0
+  
+  if("solar" %in% upgrades) {
+    # Solar production from installer estimate
+    solar_kwh <- installer$installer_annual_production_kwh  # 6,522 kWh
+    solar_savings <- solar_kwh * utility_rates$current_rate * 
+                    utility_rates$solar_offset_percentage
+    
+    # Battery TOU arbitrage savings (5kWh daily cycling)
+    battery_savings <- 5 * 365 * utility_rates$time_of_use_differential
+    
+    annual_savings <- annual_savings + solar_savings + battery_savings
+  }
+  
+  if("hpwh" %in% upgrades) {
+    # Gas savings minus electric increase
+    gas_savings <- 100 * 12  # ~$100/month gas savings
+    electric_increase <- 2400 * utility_rates$current_rate  # 2400 kWh/year
+    annual_savings <- annual_savings + gas_savings - electric_increase
+  }
+  
+  if("hp_hvac" %in% upgrades) {
+    gas_savings <- 50 * 12  # ~$50/month gas heating savings
+    electric_increase <- 5000 * utility_rates$current_rate  # 5000 kWh/year
+    annual_savings <- annual_savings + gas_savings - electric_increase
+  }
+  
+  # Calculate cash flows with escalation
+  years <- 1:move_out_year
+  cash_flows <- annual_savings * (1 + rate_escalation)^(years - 1)
+  
+  # NPV calculation
+  npv <- -initial_cost + sum(cash_flows / (1 + discount_rate)^years)
+  
+  # Simple payback
+  cumulative_savings <- cumsum(cash_flows)
+  payback_year <- which(cumulative_savings >= initial_cost)[1]
+  if(is.na(payback_year)) payback_year <- Inf
+  
+  # Return results
+  return(list(
+    upgrades = paste(upgrades, collapse = "+"),
+    initial_cost = initial_cost,
+    annual_savings_yr1 = annual_savings,
+    simple_payback = payback_year,
+    npv = npv,
+    roi_percent = (npv / initial_cost) * 100
+  ))
+}
+
+# Calculate NPV for all upgrade combinations
+upgrade_combinations <- list(
+  c("solar"),  # Includes battery
+  c("solar", "hpwh"),
+  c("solar", "hp_hvac"),
+  c("solar", "hpwh", "hp_hvac"),
+  c("hpwh"),
+  c("hp_hvac"),
+  c("hpwh", "hp_hvac")
+)
+
+# Generate results for 10-year horizon
+npv_results <- map_df(upgrade_combinations, function(combo) {
+  calculate_npv(combo, move_out_year = 10)
+})
+
+# Display results
+cat("\n=== NPV ANALYSIS RESULTS (10-Year Horizon) ===\n")
+print(kable(npv_results, digits = 0, format.args = list(big.mark = ",")))
+```
+
+## 1.3 Sensitivity Analysis
+
+```{r sensitivity_analysis}
+# Analyze sensitivity to key parameters
+sensitivity_analysis <- function(base_upgrades = c("solar")) {
+  
+  # Parameter ranges
+  parameters <- expand.grid(
+    move_out_year = c(3, 5, 7, 10, 15),
+    rate_escalation = c(0.02, 0.04, 0.07),
+    discount_rate = c(0.03, 0.05, 0.07)
+  )
+  
+  # Calculate NPV for each parameter combination
+  sensitivity_results <- parameters %>%
+    rowwise() %>%
+    mutate(
+      npv = calculate_npv(base_upgrades, 
+                         move_out_year, 
+                         rate_escalation,
+                         discount_rate)$npv
+    ) %>%
+    ungroup()
+  
+  # Create heatmap
+  p_heatmap <- ggplot(sensitivity_results, 
+                      aes(x = factor(move_out_year), 
+                          y = factor(rate_escalation), 
+                          fill = npv)) +
+    geom_tile() +
+    facet_wrap(~paste("Discount Rate:", discount_rate)) +
+    scale_fill_gradient2(low = "red", mid = "white", high = "green",
+                        midpoint = 0,
+                        labels = scales::dollar) +
+    labs(title = "NPV Sensitivity Analysis - Solar System",
+         x = "Move-out Year",
+         y = "Electricity Rate Escalation",
+         fill = "NPV") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  return(list(data = sensitivity_results, plot = p_heatmap))
+}
+
+sensitivity <- sensitivity_analysis()
+print(sensitivity$plot)
+```
+
+# 2. Emissions Component - Carbon Impact Analysis
+
+## 2.1 Baseline Emissions
+
+```{r baseline_emissions}
+# Emissions factors
+emissions_factors <- list(
+  grid_co2_per_kwh = 0.99,      # lbs CO2/kWh (GA grid with fugitive)
+  gas_co2_per_therm = 11.7,     # lbs CO2/therm
+  methane_multiplier = 1.25,     # 25% fugitive methane addition
+  social_cost_carbon = 51        # $/ton CO2 (EPA 2024)
+)
+
+# Calculate baseline emissions
+baseline_emissions <- list(
+  electric_kwh = 6540,
+  electric_co2_lbs = 6540 * emissions_factors$grid_co2_per_kwh,
+  gas_therms = 500,  # Placeholder - update with actual
+  gas_co2_lbs = 500 * emissions_factors$gas_co2_per_therm * 
+                emissions_factors$methane_multiplier,
+  total_co2_lbs = NA,
+  total_co2_tons = NA
+)
+
+baseline_emissions$total_co2_lbs <- baseline_emissions$electric_co2_lbs + 
+                                    baseline_emissions$gas_co2_lbs
+baseline_emissions$total_co2_tons <- baseline_emissions$total_co2_lbs / 2000
+
+cat("=== BASELINE EMISSIONS PROFILE ===\n")
+cat("Electric:", round(baseline_emissions$electric_co2_lbs, 0), "lbs CO2/year\n")
+cat("Gas (with fugitive):", round(baseline_emissions$gas_co2_lbs, 0), "lbs CO2/year\n")
+cat("Total:", round(baseline_emissions$total_co2_tons, 2), "tons CO2/year\n")
+cat("Social cost: $", round(baseline_emissions$total_co2_tons * 
+                           emissions_factors$social_cost_carbon, 0), "/year\n")
+```
+
+## 2.2 Emissions Reduction by Upgrade
+
+```{r emissions_impact}
+# Calculate emissions impact of upgrades
+calculate_emissions <- function(upgrades = c("solar")) {
+  
+  # Start with baseline
+  electric_emissions <- baseline_emissions$electric_co2_lbs
+  gas_emissions <- baseline_emissions$gas_co2_lbs
+  
+  if("solar" %in% upgrades) {
+    # Solar reduces grid emissions
+    solar_reduction <- installer$installer_annual_production_kwh * 
+                      emissions_factors$grid_co2_per_kwh
+    electric_emissions <- electric_emissions - solar_reduction
+  }
+  
+  if("hpwh" %in% upgrades) {
+    # Eliminate water heating gas, add electric load
+    gas_reduction <- baseline_emissions$gas_therms * 0.4 * 
+                    emissions_factors$gas_co2_per_therm * 
+                    emissions_factors$methane_multiplier
+    gas_emissions <- gas_emissions - gas_reduction
+    
+    electric_addition <- 2400 * emissions_factors$grid_co2_per_kwh
+    electric_emissions <- electric_emissions + electric_addition
+  }
+  
+  if("hp_hvac" %in% upgrades) {
+    # Eliminate space heating gas, add electric load
+    gas_reduction <- baseline_emissions$gas_therms * 0.6 * 
+                    emissions_factors$gas_co2_per_therm * 
+                    emissions_factors$methane_multiplier
+    gas_emissions <- gas_emissions - gas_reduction
+    
+    electric_addition <- 5000 * emissions_factors$grid_co2_per_kwh
+    electric_emissions <- electric_emissions + electric_addition
+  }
+  
+  # Calculate totals
+  total_emissions_lbs <- electric_emissions + gas_emissions
+  total_emissions_tons <- total_emissions_lbs / 2000
+  reduction_tons <- baseline_emissions$total_co2_tons - total_emissions_tons
+  reduction_percent <- (reduction_tons / baseline_emissions$total_co2_tons) * 100
+  
+  return(list(
+    upgrades = paste(upgrades, collapse = "+"),
+    total_tons = total_emissions_tons,
+    reduction_tons = reduction_tons,
+    reduction_percent = reduction_percent,
+    social_value = reduction_tons * emissions_factors$social_cost_carbon
+  ))
+}
+
+# Calculate for all combinations
+emissions_results <- map_df(upgrade_combinations, calculate_emissions)
+
+cat("\n=== EMISSIONS REDUCTION BY UPGRADE ===\n")
+print(kable(emissions_results, digits = 1))
+```
+
+# 3. Interactive Decision Visualization
+
+## 3.1 ROI vs Emissions Plot
+
+```{r decision_plot}
+# Combine financial and emissions results
+create_decision_plot <- function(move_out_year = 10,
+                                 rate_escalation = 0.04,
+                                 discount_rate = 0.05) {
+  
+  # Calculate financial metrics for all combinations
+  financial_data <- map_df(upgrade_combinations, function(combo) {
+    calculate_npv(combo, move_out_year, rate_escalation, discount_rate)
+  })
+  
+  # Get emissions data
+  emissions_data <- map_df(upgrade_combinations, calculate_emissions)
+  
+  # Combine datasets
+  decision_matrix <- financial_data %>%
+    left_join(emissions_data, by = "upgrades") %>%
+    mutate(
+      # Add labels for plot
+      label = case_when(
+        upgrades == "solar" ~ "Solar+Battery",
+        upgrades == "solar+hpwh" ~ "Solar+HPWH",
+        upgrades == "solar+hp_hvac" ~ "Solar+HVAC",
+        upgrades == "solar+hpwh+hp_hvac" ~ "Full Electric",
+        upgrades == "hpwh" ~ "HPWH Only",
+        upgrades == "hp_hvac" ~ "HVAC Only",
+        upgrades == "hpwh+hp_hvac" ~ "Both HPs",
+        TRUE ~ upgrades
+      ),
+      
+      # Identify Pareto optimal points
+      pareto_rank = rank(-npv) + rank(-reduction_tons)
+    )
+  
+  # Identify Pareto frontier
+  is_pareto <- function(npv_vec, co2_vec) {
+    n <- length(npv_vec)
+    pareto <- rep(TRUE, n)
+    for(i in 1:n) {
+      for(j in 1:n) {
+        if(i != j) {
+          if(npv_vec[j] >= npv_vec[i] & co2_vec[j] >= co2_vec[i] &
+             (npv_vec[j] > npv_vec[i] | co2_vec[j] > co2_vec[i])) {
+            pareto[i] <- FALSE
+          }
+        }
+      }
+    }
+    return(pareto)
+  }
+  
+  decision_matrix$pareto_optimal <- is_pareto(decision_matrix$npv, 
+                                              decision_matrix$reduction_tons)
+  
+  # Create interactive plot
+  p <- plot_ly(decision_matrix,
+               x = ~reduction_tons,
+               y = ~npv,
+               text = ~paste(label,
+                           "<br>Cost: $", format(initial_cost, big.mark=","),
+                           "<br>NPV: $", format(round(npv, 0), big.mark=","),
+                           "<br>CO2: ", round(reduction_tons, 1), " tons/yr",
+                           "<br>Payback: ", ifelse(simple_payback == Inf, 
+                                                  ">15 years", 
+                                                  paste(round(simple_payback, 1), "years")),
+                           "<br>ROI: ", round(roi_percent, 0), "%"),
+               type = 'scatter',
+               mode = 'markers+text',
+               marker = list(
+                 size = 15,
+                 color = ~ifelse(pareto_optimal, 'green', 'lightgray'),
+                 line = list(width = 2, color = 'black')
+               ),
+               textposition = 'top center',
+               textfont = list(size = 10),
+               hovertemplate = "%{text}<extra></extra>") %>%
+    layout(title = list(text = paste0("ROI vs Emissions Decision Space<br>",
+                                      "<sub>", move_out_year, " Year Horizon | ",
+                                      "Solar Energy Partners Quote</sub>")),
+           xaxis = list(title = "CO2 Reduction (tons/year)",
+                       gridcolor = 'lightgray',
+                       zeroline = TRUE,
+                       range = c(-0.5, max(decision_matrix$reduction_tons) * 1.1)),
+           yaxis = list(title = "Net Present Value ($)",
+                       gridcolor = 'lightgray', 
+                       zeroline = TRUE,
+                       zerolinewidth = 2,
+                       range = c(min(decision_matrix$npv) * 1.1, 
+                               max(decision_matrix$npv) * 1.1)),
+           hovermode = 'closest',
+           showlegend = FALSE)
+  
+  # Add Pareto frontier
+  pareto_points <- decision_matrix[decision_matrix$pareto_optimal, ]
+  pareto_points <- pareto_points[order(pareto_points$reduction_tons), ]
+  
+  if(nrow(pareto_points) > 1) {
+    p <- p %>% add_trace(data = pareto_points,
+                        x = ~reduction_tons,
+                        y = ~npv,
+                        type = 'scatter',
+                        mode = 'lines',
+                        line = list(color = 'red', dash = 'dash'),
+                        name = 'Pareto Frontier',
+                        showlegend = TRUE,
+                        hoverinfo = 'skip')
+  }
+  
+  return(list(plot = p, data = decision_matrix))
+}
+
+# Generate decision plot
+result <- create_decision_plot(move_out_year = 10)
+result$plot
+```
+
+## 3.2 Interactive Scenario Explorer
+
+```{r scenario_explorer}
+# Create UI for exploring different scenarios
+explore_scenarios <- function() {
+  
+  # Generate plots for different time horizons
+  horizons <- c(3, 5, 7, 10, 15)
+  plots <- list()
+  
+  for(years in horizons) {
+    result <- create_decision_plot(move_out_year = years)
+    plots[[paste0("year_", years)]] <- result$plot
+    
+    cat("=== ", years, " YEAR HORIZON ===\n")
+    optimal <- result$data[which.max(result$data$npv), ]
+    cat("Best NPV: ", optimal$label, " ($", 
+        format(round(optimal$npv, 0), big.mark=","), ")\n")
+    
+    optimal_co2 <- result$data[which.max(result$data$reduction_tons), ]
+    cat("Best CO2: ", optimal_co2$label, " (", 
+        round(optimal_co2$reduction_tons, 1), " tons/yr)\n\n")
+  }
+  
+  return(plots)
+}
+
+# Generate scenario plots
+scenario_plots <- explore_scenarios()
+```
+
+# 4. Decision Summary
+
+## 4.1 Key Findings
+
+```{r summary}
+# Generate decision summary
+cat("=== DECISION ANALYSIS SUMMARY ===\n\n")
+
+cat("INSTALLER QUOTE:\n")
+cat("System: 6.6kW SunPower Maxeon (15 panels @ 440W)\n")
+cat("Battery: 5kWh Enphase IQ Battery 5P\n")
+cat("Net cost: $28,804 (after 30% tax credit)\n")
+cat("Production: 6,522 kWh/year (96% offset)\n")
+cat("Timeline: Must install by 12/31/2025 for tax credit\n\n")
+
+# Find optimal solutions
+result_10yr <- create_decision_plot(move_out_year = 10)
+optimal_npv <- result_10yr$data[which.max(result_10yr$data$npv), ]
+optimal_co2 <- result_10yr$data[which.max(result_10yr$data$reduction_tons), ]
+
+cat("10-YEAR ANALYSIS:\n")
+cat("Best financial return: ", optimal_npv$label, "\n")
+cat("  NPV: $", format(round(optimal_npv$npv, 0), big.mark=","), "\n")
+cat("  CO2 reduction: ", round(optimal_npv$reduction_tons, 1), " tons/year\n\n")
+
+cat("Best emissions reduction: ", optimal_co2$label, "\n")
+cat("  CO2 reduction: ", round(optimal_co2$reduction_tons, 1), " tons/year\n")
+cat("  NPV: $", format(round(optimal_co2$npv, 0), big.mark=","), "\n\n")
+
+cat("CRITICAL FACTORS:\n")
+cat("• Tax credit expires in", tax_credit$days_remaining, "days\n")
+cat("• Every month of delay reduces NPV by ~$100\n")
+cat("• Battery provides backup power and TOU arbitrage\n")
+cat("• Heat pumps can be added later without losing incentives\n")
+```
+
+## 4.2 Implementation Timeline
+
+```{r timeline}
+# Create implementation timeline
+timeline <- data.frame(
+  Phase = c("Immediate", "October 2025", "November 2025", 
+           "December 2025", "2026-2027", "2028-2030"),
+  Action = c("Sign contract with Solar Energy Partners",
+            "Complete electrical service upgrade",
+            "Install solar panels and battery",
+            "Commission system, start net metering",
+            "Monitor performance, consider HPWH",
+            "Evaluate heat pump HVAC conversion"),
+  Financial = c("Lock in pricing and tax credit",
+               "$10,000 electrical upgrade",
+               "Begin installation process",
+               "Start saving ~$65/month",
+               "$4,500 for HPWH when needed",
+               "$15,000 for HVAC when needed"),
+  Notes = c("Critical to meet deadline",
+           "Required for solar installation", 
+           "Weather dependent - plan buffer",
+           "GA Power approval needed",
+           "No tax credit but gas savings",
+           "Evaluate based on gas prices")
+)
+
+kable(timeline, caption = "Recommended Implementation Timeline")
+```
+
+# 5. Data Export
+
+```{r export_results}
+# Save results for future reference
+decision_results <- list(
+  npv_results = npv_results,
+  emissions_results = emissions_results,
+  sensitivity = sensitivity$data,
+  installer_quote = cost_bounds$solar,
+  analysis_date = Sys.Date()
+)
+
+save(decision_results, file = "output/decision_analysis.RData")
+
+cat("\n=== ANALYSIS COMPLETE ===\n")
+cat("Results saved to output/decision_analysis.RData\n")
+cat("Interactive plots available for exploration\n")
+```

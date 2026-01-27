@@ -1,0 +1,1657 @@
+---
+title: "House Component Analysis - Solar & Energy Decision Framework v9"
+subtitle: "2265 Ridgedale Road, Decatur GA - Data Processing & System Sizing"
+author: "Three-Component Decision Framework"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+---
+
+<!--
+SOLAR & ENERGY EFFICIENCY DECISION ANALYSIS - THREE COMPONENT FRAMEWORK
+================================================================================
+Property: 2265 Ridgedale Road, Decatur GA (DeKalb County)
+Timeline: Potential move in 1-10 years (continuous variable)
+Priorities: Emissions reduction + financial ROI optimization
+
+COMPONENT ARCHITECTURE:
+1. HOUSE COMPONENT (THIS FILE): CSV data processing, energy/temperature correlations, 
+   solar system sizing, battery/backup configuration decisions
+2. FINANCIAL COMPONENT: Economic modeling, ROI calculations, home values
+3. EMISSIONS COMPONENT: CO2 avoidance calculations, cost per ton, grid mix evolution
+
+KEY DECISIONS SUPPORTED BY HOUSE COMPONENT:
+- Solar system size (3.8kW baseline from 6,540 kWh annual consumption)
+- Battery storage: Yes/No and capacity sizing
+- Sunlight Backup options and emergency power requirements
+- Heat pump sizing for space heating and water heating conversion
+- Panel upgrade requirements (200A needed for solar + renovations)
+- Efficiency upgrade sequencing and impact quantification
+
+CRITICAL TIMING: 30% federal tax credit expires 12/31/2025
+INSTALLATION: Left to contractors - this analysis provides data for decision-making
+OUTPUT: house_profile.RData for use by financial and emissions components
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+# Clear environment
+rm(list=ls())
+
+# Set working directory relative to .Rmd location
+r_scriptwd <- getwd()
+wd <- dirname(r_scriptwd)  # solar/scripts/ → solar/
+knitr::opts_knit$set(root.dir = wd)
+
+# Set relative directories from solar/
+data_dir <- "data"  # Data is in solar/data, not ../data
+ecobee_dir <- file.path(data_dir, "ecobee")
+output_dir <- "output"
+fig_dir <- "figures"
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+# Package management function
+f.ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# Load required libraries
+packages <- c("tidyverse", "lubridate", "plotly", "DT", "kableExtra", "readxl")
+f.ipak(packages)
+```
+
+```{r file_paths}
+# File paths - separate from analysis parameters  
+
+# Emporia files at different time resolutions for comprehensive analysis
+emporia_files <- list(
+  sec_1 = file.path(data_dir, "C9CD28-Ridgedale_electrical_meter-1SEC.csv"),
+  min_1 = file.path(data_dir, "C9CD28-Ridgedale_electrical_meter-1MIN.csv"),
+  min_15 = file.path(data_dir, "C9CD28-Ridgedale_electrical_meter-15MIN.csv"),
+  hour_1 = file.path(data_dir, "C9CD28-Ridgedale_electrical_meter-1H.csv"),
+  day_1 = file.path(data_dir, "C9CD28-Ridgedale_electrical_meter-1DAY.csv")
+)
+
+# Other data files - updated with actual filenames
+ecobee_folder <- ecobee_dir
+ga_power_energy_file <- file.path(data_dir, "ENERGY_GPC_Usage_2023-09-09-2025-09-06.xlsx")
+ga_power_cost_file <- file.path(data_dir, "COST_GPC_Usage_2023-09-09-2025-09-06.xlsx")
+ga_power_bills_file <- file.path(data_dir, "ga_power_bills_csv.csv")
+gas_usage_file <- file.path(data_dir, "Natural_gas_UsageHistory_0056025455578371.csv")
+temp_logger_file <- NULL  # Set when available
+
+# Display file paths for verification
+cat("=== V9 FILE PATHS CONFIGURED ===\n")
+cat("Emporia resolutions available:", length(emporia_files), "\n")
+cat("Data directory:", data_dir, "\n")
+```
+
+```{r function_variables}
+# Central configuration - all user-configurable analysis parameters
+function_variables <- vector(mode="list")
+
+### ANALYSIS PARAMETERS ####
+function_variables$annual_consumption_baseline <- 6540  # kWh/year
+function_variables$solar_offset_target <- 1.05  # 105% offset
+function_variables$climate_zone <- "3A"  # Georgia Mixed Humid
+
+### HEAT PUMP EFFICIENCY ASSUMPTIONS ####
+function_variables$hpwh_cop <- 3.5  # Heat pump water heater COP
+function_variables$hp_heating_hspf_equiv <- 2.5  # Space heating COP equivalent
+function_variables$gas_to_electric_conversion <- 29.3  # kWh equivalent per therm
+
+### SOLAR SYSTEM PARAMETERS ####
+function_variables$production_per_kw_west <- 1380  # kWh/kW annually, west-facing
+function_variables$panel_wattage_options <- c(300, 350, 400, 450)
+
+### ECOBEE ROOM TEMPERATURE VARIABLES ####
+function_variables$ecobee_room_temps <- c("living_room_temp_f", "bedroom_temp_f", "office_temp_f")
+
+### DATA QUALITY THRESHOLDS ####
+function_variables$min_daily_kwh <- 0.1  # Minimum daily usage to include
+function_variables$max_discrepancy_pct <- 10  # Flag days with >10% difference
+
+### RATE STRUCTURE ASSUMPTIONS ####
+function_variables$basic_service_daily <- 0.4603  # GA Power basic service $/day
+function_variables$peak_hours_start <- 14  # 2 PM
+function_variables$peak_hours_end <- 19   # 7 PM
+
+### ANOMALY EVENT DATES (USER MUST UPDATE WITH ACTUAL DATES) ####
+function_variables$manual_events <- data.frame(
+  date = as.Date(c("2024-01-15", "2024-07-20", "2024-09-05")),  # UPDATE THESE
+  event_type = c("equipment_failure", "power_outage", "hvac_repair"),
+  description = c("Heater malfunction", "Power outage during heat", "AC compressor repair"),
+  exclude_from_efficiency = c(TRUE, TRUE, TRUE),
+  notes = c("Gas heater issue", "External grid failure", "HVAC replacement"),
+  stringsAsFactors = FALSE
+)
+
+### CIRCUIT IDENTIFICATION ####
+function_variables$water_heater_circuit <- "Water_Heater_3__Crawlspace__kwh"  # Found in your actual data
+function_variables$emporia_mains_patterns <- c("Mains_A", "Mains_B")
+
+### BATTERY ANALYSIS SCENARIOS ####
+function_variables$battery_scenarios <- data.frame(
+  scenario = c("no_battery", "essential_loads", "partial_home", "whole_home"),
+  description = c("Grid-tied only", "Refrigerator, lights, outlets", 
+                  "Essential + HVAC", "Full home backup"),
+  typical_capacity_kwh = c(0, 10, 20, 30),
+  estimated_cost = c(0, 12000, 20000, 35000),
+  backup_duration_hours = c(0, 24, 12, 8),
+  stringsAsFactors = FALSE
+)
+
+### INFRASTRUCTURE STATUS ####
+function_variables$current_panel_amps <- 100
+function_variables$target_panel_amps <- 200
+function_variables$roof_orientation <- "west"
+function_variables$solar_ready_completed <- TRUE
+
+cat("Function variables initialized. USER ACTIONS REQUIRED:\n")
+cat("1. Update file paths to match your actual data files\n")
+cat("2. Update manual_events with actual dates and descriptions\n") 
+cat("3. Update water_heater_circuit with correct Emporia circuit name\n")
+cat("4. Verify ecobee_room_temps match your thermostat variable names\n")
+```
+
+# 1. Data Import Pipeline - Multiple Energy Sources
+
+## 1a. Emporia Circuit-Level Data (MODIFIED - Multiple Resolutions, Keep All Variables)
+
+```{r emporia_data_import}
+# Function to load Emporia circuit-level energy monitoring data at multiple resolutions
+# EDIT: Load all resolutions, keep ALL circuit data, allow resolution selection
+load_emporia_data <- function(resolution = "day_1", files_list = emporia_files) {
+  
+  # Validate resolution selection
+  if(!resolution %in% names(files_list)) {
+    cat("Available resolutions:", paste(names(files_list), collapse = ", "), "\n")
+    stop("Invalid resolution. Choose from available options above.")
+  }
+  
+  file_path <- files_list[[resolution]]
+  
+  # Check if file exists
+  if(!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+  
+  cat("Loading Emporia data at", resolution, "resolution\n")
+  cat("File:", basename(file_path), "\n")
+  
+  # Load raw data keeping ALL columns
+  emporia_data <- read.csv(file_path, stringsAsFactors = FALSE)
+  
+  # Parse datetime - try multiple formats for robustness
+  datetime_formats <- c("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%m/%d/%Y %H:%M", "%m/%d/%Y")
+  emporia_data$datetime <- NA
+  
+  for(fmt in datetime_formats) {
+    if(all(is.na(emporia_data$datetime))) {
+      emporia_data$datetime <- as.POSIXct(emporia_data[,1], format = fmt, tz = "America/New_York")
+    }
+  }
+  
+  # If still no success, try automatic parsing
+  if(all(is.na(emporia_data$datetime))) {
+    emporia_data$datetime <- as.POSIXct(emporia_data[,1], tz = "America/New_York")
+  }
+  
+  # Calculate total house consumption (Mains A + Mains B) but keep original columns
+  mains_a_col <- grep(function_variables$emporia_mains_patterns[1], names(emporia_data), value = TRUE)[1]
+  mains_b_col <- grep(function_variables$emporia_mains_patterns[2], names(emporia_data), value = TRUE)[1]
+  
+  if(!is.na(mains_a_col) && !is.na(mains_b_col)) {
+    emporia_data$total_house_kwh <- emporia_data[[mains_a_col]] + emporia_data[[mains_b_col]]
+  }
+  
+  # Clean up column names but KEEP ALL COLUMNS
+  names(emporia_data) <- gsub("Ridgedale.electrical.meter.", "", names(emporia_data))
+  names(emporia_data) <- gsub("\\.\\.kWhs\\.", "_kwh", names(emporia_data))
+  names(emporia_data) <- gsub("\\.\\.kWatts\\.", "_kw", names(emporia_data))
+  names(emporia_data) <- gsub("\\.", "_", names(emporia_data))
+  
+  # Basic filtering only - keep ALL circuit variables
+  emporia_data <- emporia_data %>%
+    filter(!is.na(datetime)) %>%
+    arrange(datetime)
+  
+  # Add resolution metadata
+  emporia_data$data_resolution <- resolution
+  
+  cat("=== EMPORIA DATA SUMMARY ===\n")
+  cat("Resolution:", resolution, "\n")
+  cat("Date range:", min(emporia_data$datetime, na.rm = TRUE), "to", max(emporia_data$datetime, na.rm = TRUE), "\n")
+  cat("Total records:", nrow(emporia_data), "\n")
+  cat("Total columns (all circuits kept):", ncol(emporia_data), "\n")
+  if("total_house_kwh" %in% names(emporia_data)) {
+    cat("Total consumption:", round(sum(emporia_data$total_house_kwh, na.rm = TRUE), 1), "kWh\n")
+  }
+  
+  # Print available circuits for user reference
+  circuit_columns <- grep("_kwh|_kw", names(emporia_data), value = TRUE)
+  cat("Available circuits:", length(circuit_columns), "\n")
+  cat("First 10 circuits:", paste(head(circuit_columns, 10), collapse = ", "), "\n")
+  
+  # Resolution-specific insights
+  if(resolution %in% c("sec_1", "min_1")) {
+    cat("\n=== HIGH-RESOLUTION ANALYSIS CAPABILITY ===\n")
+    cat("- LRA (motor starting) event detection possible\n")
+    cat("- Instantaneous power vs energy analysis\n") 
+    cat("- Battery power output sizing (surge capacity)\n")
+    cat("- HVAC cycling and compressor starts visible\n")
+  } else if(resolution %in% c("min_15", "hour_1")) {
+    cat("\n=== MEDIUM-RESOLUTION ANALYSIS CAPABILITY ===\n")
+    cat("- Solar production vs consumption matching\n")
+    cat("- Time-of-use optimization\n")
+    cat("- Daily load profile analysis\n")
+    cat("- Battery capacity sizing\n")
+  } else if(resolution == "day_1") {
+    cat("\n=== DAILY RESOLUTION ANALYSIS CAPABILITY ===\n")
+    cat("- Annual energy balance\n")
+    cat("- Seasonal patterns\n")
+    cat("- Solar system sizing\n")
+    cat("- Long-term efficiency trends\n")
+  }
+  
+  return(emporia_data)
+}
+
+# Load multiple resolutions for different analyses
+# DEFAULT: Load daily data for system sizing
+emporia_daily <- load_emporia_data("day_1")
+
+# OPTIONAL: Load higher resolution data for battery/LRA analysis
+# emporia_1min <- load_emporia_data("min_1")  # For LRA detection
+# emporia_15min <- load_emporia_data("min_15")  # For solar matching
+```
+
+[Rest of sections 1b through 3 remain the same as previous version...]
+
+## 1b. Ecobee Thermostat Data (MODIFIED - Add Room Temperatures)
+
+```{r ecobee_data_import}
+# Function to load and combine multiple Ecobee monthly CSV files
+# EDIT: Add 3 room temperatures for future efficiency analysis
+load_ecobee_data <- function(folder_path = ecobee_folder) {
+  
+  # Get all CSV files in folder matching ecobee pattern
+  csv_files <- list.files(folder_path, pattern = "report.*\\.csv$", full.names = TRUE)
+  
+  if(length(csv_files) == 0) {
+    cat("No ecobee CSV files found in", folder_path, "\n")
+    return(NULL)
+  }
+  
+  cat("Found", length(csv_files), "ecobee files to process\n")
+  
+  # Read and combine all files - KEEP ALL VARIABLES
+  ecobee_combined <- map_dfr(csv_files, function(file) {
+    
+    cat("Processing:", basename(file), "\n")
+    
+    # Read raw file to handle header metadata
+    raw_lines <- readLines(file)
+    
+    # Find where actual CSV data starts (skip header metadata)
+    csv_start <- which(str_detect(raw_lines, "^Date,Time,"))[1]
+    
+    if(is.na(csv_start)) {
+      warning("Could not find CSV header in file: ", file)
+      return(NULL)
+    }
+    
+    # Extract metadata from header lines
+    thermostat_id <- str_extract(raw_lines[1], "\\d+")
+    start_date <- str_extract(raw_lines[3], "\\d{4}-\\d{2}-\\d{2}")
+    end_date <- str_extract(raw_lines[4], "\\d{4}-\\d{2}-\\d{2}")
+    
+    # Write CSV data to temporary file (skip metadata lines)
+    temp_file <- tempfile()
+    writeLines(raw_lines[csv_start:length(raw_lines)], temp_file)
+    
+    # Read actual CSV data - KEEP ALL COLUMNS
+    data <- read.csv(temp_file, stringsAsFactors = FALSE)
+    unlink(temp_file)
+    
+    # Add metadata columns
+    data$thermostat_id <- thermostat_id
+    data$file_start_date <- start_date
+    data$file_end_date <- end_date
+    data$source_file <- basename(file)
+    
+    return(data)
+  })
+  
+  if(is.null(ecobee_combined) || nrow(ecobee_combined) == 0) {
+    warning("No data successfully loaded from ecobee files")
+    return(NULL)
+  }
+  
+  # Create proper datetime column
+  ecobee_combined$datetime <- as.POSIXct(
+    paste(ecobee_combined$Date, ecobee_combined$Time), 
+    format = "%Y-%m-%d %H:%M:%S",
+    tz = "America/New_York"
+  )
+  
+  # Clean and standardize column names but KEEP ALL COLUMNS
+  ecobee_combined <- ecobee_combined %>%
+    rename_with(~ str_replace_all(.x, "\\.", "_")) %>%
+    rename_with(~ str_replace_all(.x, "[()%]", "")) %>%
+    rename_with(~ tolower(.x))
+  
+  # Create standardized column names for key metrics
+  if("cool_set_temp_f" %in% names(ecobee_combined)) {
+    ecobee_combined <- ecobee_combined %>%
+      rename(
+        cool_setpoint = cool_set_temp_f,
+        heat_setpoint = heat_set_temp_f,
+        current_temp = current_temp_f,
+        current_humidity = current_humidity_rh,
+        outdoor_temp = outdoor_temp_f,
+        cool_runtime_sec = cool_stage_1_sec,
+        heat_runtime_sec = heat_stage_1_sec,
+        fan_runtime_sec = fan_sec
+      )
+  }
+  
+  # EDIT: Add room temperature variables for efficiency analysis
+  # Check for room temperature columns and standardize names
+  available_cols <- names(ecobee_combined)
+  
+  # Look for room temperature patterns and map to standardized names
+  room_temp_mapping <- function_variables$ecobee_room_temps
+  for(i in 1:length(room_temp_mapping)) {
+    # Look for similar column names in the data
+    potential_matches <- grep(paste0("room|temp|sensor"), available_cols, value = TRUE, ignore.case = TRUE)
+    if(length(potential_matches) >= i) {
+      # Map to standardized name if available
+      if(room_temp_mapping[i] %in% available_cols) {
+        cat("Found room temperature:", room_temp_mapping[i], "\n")
+      } else {
+        cat("Room temperature variable", room_temp_mapping[i], "not found in data\n")
+      }
+    }
+  }
+  
+  # Sort by datetime and calculate derived metrics - KEEP ALL ORIGINAL VARIABLES
+  ecobee_combined <- ecobee_combined %>%
+    arrange(datetime) %>%
+    filter(!is.na(datetime)) %>%
+    mutate(
+      # Convert runtime seconds to minutes
+      cool_runtime_min = if("cool_runtime_sec" %in% names(.)) cool_runtime_sec / 60 else NA,
+      heat_runtime_min = if("heat_runtime_sec" %in% names(.)) heat_runtime_sec / 60 else NA,
+      fan_runtime_min = if("fan_runtime_sec" %in% names(.)) fan_runtime_sec / 60 else NA,
+      
+      # Calculate total HVAC runtime
+      total_hvac_runtime_min = if(all(c("cool_runtime_min", "heat_runtime_min") %in% names(.))) 
+        cool_runtime_min + heat_runtime_min else NA,
+      
+      # Date components for aggregation
+      date = as.Date(datetime),
+      hour = hour(datetime),
+      month = month(datetime),
+      year = year(datetime)
+    )
+  
+  # Data quality summary
+  cat("\n=== ECOBEE DATA SUMMARY ===\n")
+  cat("Date range:", min(ecobee_combined$datetime), "to", max(ecobee_combined$datetime), "\n")
+  cat("Total records:", nrow(ecobee_combined), "\n")
+  cat("Total columns (all variables kept):", ncol(ecobee_combined), "\n")
+  cat("Data frequency: 5-minute intervals\n")
+  
+  if("cool_runtime_min" %in% names(ecobee_combined)) {
+    cat("Total cooling runtime:", round(sum(ecobee_combined$cool_runtime_min, na.rm = TRUE) / 60, 1), "hours\n")
+  }
+  if("heat_runtime_min" %in% names(ecobee_combined)) {
+    cat("Total heating runtime:", round(sum(ecobee_combined$heat_runtime_min, na.rm = TRUE) / 60, 1), "hours\n")
+  }
+  
+  # Check for room temperature availability
+  room_temp_cols <- grep("temp", names(ecobee_combined), value = TRUE)
+  cat("Temperature columns available:", paste(room_temp_cols, collapse = ", "), "\n")
+  
+  return(ecobee_combined)
+}
+
+# Load Ecobee data - USER UPDATE PATH
+ecobee_data <- load_ecobee_data(ecobee_folder)
+```
+
+## 1c. Georgia Power Usage and Cost Data
+
+```{r ga_power_data_import}
+# Function to load and combine Georgia Power Excel files (energy + cost)
+load_ga_power_data <- function(energy_file_path = ga_power_energy_file, 
+                               cost_file_path = ga_power_cost_file, 
+                               data_type = "hourly") {
+  
+  # Function to read and clean individual GA Power file
+  read_ga_power_file <- function(file_path, value_col_name) {
+    # Read Excel file, skipping header rows
+    raw_data <- read_excel(file_path, 
+                           sheet = 1,
+                           skip = 2,  # Skip disclaimer and account number rows
+                           col_names = TRUE)
+    
+    # Clean column names
+    names(raw_data) <- c("hour", "value", "temp")
+    
+    # Parse and clean data
+    clean_data <- raw_data %>%
+      mutate(
+        # Convert hour to proper datetime
+        datetime = if_else(
+          is.character(hour),
+          as.POSIXct(hour, format = "%Y-%m-%d %H:%M", tz = "America/New_York"),
+          as.POSIXct(as.numeric(hour) * 86400, 
+                     origin = "1899-12-30", tz = "America/New_York")
+        ),
+        
+        # Clean value data (remove any non-numeric characters)
+        !!value_col_name := as.numeric(str_replace_all(as.character(value), "[^0-9.-]", "")),
+        
+        # Clean temperature data (keep only one temp column)
+        outdoor_temp = as.numeric(temp)
+      ) %>%
+      
+      # Select only needed columns
+      select(datetime, !!value_col_name, outdoor_temp) %>%
+      
+      # Remove rows with missing datetime
+      filter(!is.na(datetime)) %>%
+      arrange(datetime)
+    
+    return(clean_data)
+  }
+  
+  cat("Loading Georgia Power data files...\n")
+  
+  # Load energy data (kWh)
+  cat("Processing energy file:", basename(energy_file_path), "\n")
+  energy_data <- read_ga_power_file(energy_file_path, "kwh_hourly")
+  
+  # Load cost data ($)
+  cat("Processing cost file:", basename(cost_file_path), "\n")
+  cost_data <- read_ga_power_file(cost_file_path, "cost_hourly")
+  
+  # Join the datasets by datetime using inner_join to ensure matching records
+  ga_power_data <- energy_data %>%
+    inner_join(cost_data %>% select(datetime, cost_hourly), 
+               by = "datetime", 
+               suffix = c("_energy", "_cost")) %>%
+    
+    # Add derived columns
+    mutate(
+      # Extract date components for aggregation
+      date = as.Date(datetime),
+      hour_of_day = hour(datetime),
+      month = month(datetime),
+      year = year(datetime),
+      week_day = wday(datetime, label = TRUE),
+      
+      # Calculate effective rate ($/kWh) - handle division by zero
+      rate_per_kwh = if_else(kwh_hourly > 0, cost_hourly / kwh_hourly, NA_real_),
+      
+      # Calculate time-of-use periods (adjust based on GA Power rate schedule)
+      time_period = case_when(
+        hour_of_day >= function_variables$peak_hours_start & 
+        hour_of_day < function_variables$peak_hours_end & 
+          week_day %in% c("Mon", "Tue", "Wed", "Thu", "Fri") ~ "peak",        # 2-7 PM weekdays
+        hour_of_day >= 6 & hour_of_day < function_variables$peak_hours_start & 
+          week_day %in% c("Mon", "Tue", "Wed", "Thu", "Fri") ~ "shoulder",    # 6 AM - 2 PM weekdays  
+        TRUE ~ "off_peak"                                                     # Nights and weekends
+      ),
+      
+      # Season for rate analysis
+      season = case_when(
+        month %in% c(6, 7, 8, 9) ~ "summer",
+        month %in% c(12, 1, 2) ~ "winter", 
+        TRUE ~ "spring_fall"
+      )
+    ) %>%
+    arrange(datetime)
+  
+  # Data validation and quality checks
+  cat("\n=== GEORGIA POWER COMBINED DATA SUMMARY ===\n")
+  cat("Date range:", min(ga_power_data$datetime), "to", max(ga_power_data$datetime), "\n")
+  cat("Total records:", nrow(ga_power_data), "\n")
+  cat("Total kWh in period:", round(sum(ga_power_data$kwh_hourly, na.rm = TRUE), 1), "\n")
+  cat("Total cost in period: $", round(sum(ga_power_data$cost_hourly, na.rm = TRUE), 2), "\n")
+  
+  # Rate analysis
+  rate_stats <- ga_power_data %>%
+    filter(!is.na(rate_per_kwh), is.finite(rate_per_kwh)) %>%
+    summarise(
+      avg_rate = mean(rate_per_kwh),
+      median_rate = median(rate_per_kwh)
+    )
+  cat("Average rate: $", round(rate_stats$avg_rate, 4), "/kWh\n")
+  
+  return(ga_power_data)
+}
+
+# Load GA Power data - USER UPDATE PATHS
+# ga_power_data <- load_ga_power_data(ga_power_energy_file, ga_power_cost_file)
+```
+
+## 1d. Data Quality Validation - Emporia vs Georgia Power
+
+```{r emporia_ga_power_comparison}
+# Function to compare Emporia vs Georgia Power energy data
+compare_emporia_ga_power <- function(emporia_data, ga_power_data, 
+                                     comparison_period = "daily") {
+  
+  cat("=== EMPORIA vs GEORGIA POWER COMPARISON ===\n")
+  
+  # Prepare Emporia data for comparison
+  if(comparison_period == "daily") {
+    emporia_agg <- emporia_data %>%
+      mutate(date = as.Date(datetime)) %>%
+      group_by(date) %>%
+      summarise(
+        emporia_total_kwh = sum(total_house_kwh, na.rm = TRUE),
+        emporia_records = n(),
+        .groups = 'drop'
+      ) %>%
+      filter(emporia_total_kwh > 0)  # Remove days with no data
+    
+    # Prepare GA Power data  
+    ga_power_agg <- ga_power_data %>%
+      group_by(date) %>%
+      summarise(
+        ga_power_total_kwh = sum(kwh_hourly, na.rm = TRUE),
+        ga_power_records = n(),
+        daily_cost = sum(cost_hourly, na.rm = TRUE),
+        avg_temp = mean(outdoor_temp, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      filter(ga_power_total_kwh > 0)  # Remove days with no data
+  }
+  
+  # Join the datasets
+  comparison_data <- emporia_agg %>%
+    inner_join(ga_power_agg, by = "date") %>%
+    mutate(
+      # Calculate differences
+      kwh_difference = emporia_total_kwh - ga_power_total_kwh,
+      kwh_difference_pct = (kwh_difference / ga_power_total_kwh) * 100,
+      
+      # Absolute difference for magnitude analysis
+      abs_difference = abs(kwh_difference),
+      abs_difference_pct = abs(kwh_difference_pct)
+    ) %>%
+    filter(
+      # Remove periods with very low usage (measurement noise)
+      ga_power_total_kwh > function_variables$min_daily_kwh,
+      emporia_total_kwh > function_variables$min_daily_kwh
+    )
+  
+  # Calculate summary metrics
+  summary_stats <- comparison_data %>%
+    summarise(
+      emporia_total = sum(emporia_total_kwh),
+      ga_power_total = sum(ga_power_total_kwh),
+      total_difference = sum(kwh_difference),
+      total_difference_pct = (total_difference / ga_power_total) * 100,
+      correlation = cor(emporia_total_kwh, ga_power_total_kwh),
+      mean_abs_difference_pct = mean(abs_difference_pct),
+      large_discrepancies = sum(abs_difference_pct > function_variables$max_discrepancy_pct)
+    )
+  
+  # Print summary
+  cat("Overlapping periods:", nrow(comparison_data), "\n")
+  cat("Emporia total:", round(summary_stats$emporia_total, 1), "kWh\n")
+  cat("GA Power total:", round(summary_stats$ga_power_total, 1), "kWh\n") 
+  cat("Percentage difference:", round(summary_stats$total_difference_pct, 2), "%\n")
+  cat("Correlation coefficient:", round(summary_stats$correlation, 3), "\n")
+  cat("Mean absolute % difference:", round(summary_stats$mean_abs_difference_pct, 1), "%\n")
+  cat("Periods with >", function_variables$max_discrepancy_pct, "% discrepancy:", summary_stats$large_discrepancies, "\n")
+  
+  # Create scatter plot
+  scatter_plot <- ggplot(comparison_data, 
+                         aes(x = ga_power_total_kwh, y = emporia_total_kwh)) +
+    geom_point(alpha = 0.6, color = "blue") +
+    geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+    geom_smooth(method = "lm", se = TRUE, color = "green") +
+    labs(
+      title = "Emporia vs GA Power - Daily Comparison",
+      x = "GA Power kWh",
+      y = "Emporia kWh",
+      caption = paste("Correlation:", round(summary_stats$correlation, 3),
+                      "| Total difference:", round(summary_stats$total_difference_pct, 1), "%")
+    ) +
+    theme_minimal()
+  
+  # Return results
+  results <- list(
+    comparison_data = comparison_data,
+    summary_stats = summary_stats,
+    scatter_plot = scatter_plot
+  )
+  
+  return(results)
+}
+
+# Run data validation - USER EXECUTE AFTER DATA LOADING
+# comparison_results <- compare_emporia_ga_power(emporia_daily, ga_power_data, "daily")
+# print(comparison_results$scatter_plot)
+```
+
+## 1e. Georgia Power Monthly Bills (CSV)
+
+```{r ga_power_bills_import}
+# Function to load and analyze Georgia Power monthly bill data
+load_ga_power_bills <- function(file_path = ga_power_bills_file) {
+  
+  # Load monthly bill data (CSV format)
+  bill_data <- read.csv(file_path, stringsAsFactors = FALSE)
+  
+  # Parse billing periods to extract dates
+  bill_data <- bill_data %>%
+    mutate(
+      # Extract start date from billing period (assuming format like "Jan 15 - Feb 14")
+      bill_month = str_extract(Billing.Period, "^[A-Za-z]+"),
+      bill_year = case_when(
+        # Handle year transitions in billing periods
+        str_detect(Date.Range, "2024") ~ 2024,
+        str_detect(Date.Range, "2023") ~ 2023,
+        str_detect(Date.Range, "2025") ~ 2025,
+        TRUE ~ 2024  # Default assumption
+      ),
+      
+      # Create standardized date (first day of billing month)
+      date = as.Date(paste(bill_year, match(bill_month, month.abb), "01", sep = "-")),
+      
+      # Standardize column names for analysis
+      kwh_used = Usage..kWh.,
+      current_service = Current.Service....,
+      environmental_fee = Environmental.Compliance.Cost....,
+      nuclear_cost = Nuclear.Construction.Cost....,
+      franchise_fee = Municipal.Franchise.Fee....,
+      sales_tax = Sales.Tax....,
+      total_bill = Total.Bill....
+    ) %>%
+    
+    # Calculate Georgia Power rate structure components
+    mutate(
+      # Calculate days in billing period (approximate)
+      days_in_period = case_when(
+        bill_month %in% c("Feb") ~ 28,
+        bill_month %in% c("Apr", "Jun", "Sep", "Nov") ~ 30,
+        TRUE ~ 31
+      ),
+      
+      # Basic service charge (fixed daily fee: $0.4603/day)
+      basic_service_charge = function_variables$basic_service_daily * days_in_period,
+      
+      # Separate usage charges from fixed charges in Current Service
+      # Current Service = Basic Service + Usage Charges + Fuel Cost Recovery
+      estimated_usage_charge = current_service - basic_service_charge,
+      
+      # Calculate implied $/kWh rate from usage portion only
+      implied_rate_per_kwh = if_else(kwh_used > 0, 
+                                     estimated_usage_charge / kwh_used, 
+                                     NA_real_),
+      
+      # Total fixed fees that solar CANNOT offset
+      total_fixed_fees = basic_service_charge + environmental_fee + 
+        nuclear_cost + franchise_fee,
+      
+      # Variable charges that solar CAN offset (usage portion only)
+      solar_offsettable_charges = estimated_usage_charge,
+      
+      # Percentage of bill that solar can offset
+      solar_offset_potential_pct = if_else(total_bill > 0,
+                                           solar_offsettable_charges / total_bill * 100,
+                                           NA_real_),
+      
+      # Environmental fee as percentage of current service (should be ~12%)
+      environmental_pct = if_else(current_service > 0, 
+                                  environmental_fee / current_service * 100, 
+                                  NA_real_),
+      
+      # Season classification
+      season = case_when(
+        month(date) %in% c(6, 7, 8, 9) ~ "summer",
+        month(date) %in% c(12, 1, 2) ~ "winter",
+        TRUE ~ "spring_fall"
+      ),
+      
+      # Peak season flag (June-September per GA Power summer rates)
+      is_peak_season = month(date) %in% c(6, 7, 8, 9)
+    ) %>%
+    
+    # Sort by date
+    arrange(date)
+  
+  # Data quality checks and summary
+  cat("=== GEORGIA POWER MONTHLY BILLS ANALYSIS ===\n")
+  cat("Analysis period:", min(bill_data$date), "to", max(bill_data$date), "\n")
+  cat("Total bills analyzed:", nrow(bill_data), "\n")
+  
+  # Annual totals and averages
+  annual_summary <- bill_data %>%
+    summarise(
+      total_kwh = sum(kwh_used, na.rm = TRUE),
+      total_bill_amount = sum(total_bill, na.rm = TRUE),
+      total_fixed_fees = sum(total_fixed_fees, na.rm = TRUE),
+      total_offsettable = sum(solar_offsettable_charges, na.rm = TRUE),
+      avg_monthly_kwh = mean(kwh_used, na.rm = TRUE),
+      avg_monthly_bill = mean(total_bill, na.rm = TRUE),
+      avg_rate = mean(implied_rate_per_kwh, na.rm = TRUE),
+      avg_solar_offset_potential = mean(solar_offset_potential_pct, na.rm = TRUE),
+      avg_environmental_pct = mean(environmental_pct, na.rm = TRUE)
+    )
+  
+  cat("\nANNUAL SUMMARY:\n")
+  cat("Total kWh:", round(annual_summary$total_kwh, 0), "\n")
+  cat("Total bill amount: $", round(annual_summary$total_bill_amount, 2), "\n")
+  cat("Average monthly kWh:", round(annual_summary$avg_monthly_kwh, 0), "\n")
+  cat("Average monthly bill: $", round(annual_summary$avg_monthly_bill, 2), "\n")
+  cat("Average effective rate: $", round(annual_summary$avg_rate, 4), "/kWh\n")
+  
+  cat("\nSOLAR OFFSET ANALYSIS:\n")
+  cat("Total fixed fees (solar CANNOT offset): $", round(annual_summary$total_fixed_fees, 2), 
+      " (", round(annual_summary$total_fixed_fees/annual_summary$total_bill_amount*100, 1), "% of total bill)\n")
+  cat("Variable charges (solar CAN offset): $", round(annual_summary$total_offsettable, 2),
+      " (", round(annual_summary$total_offsettable/annual_summary$total_bill_amount*100, 1), "% of total bill)\n")
+  cat("Average solar offset potential: ", round(annual_summary$avg_solar_offset_potential, 1), "% per month\n")
+  
+  return(bill_data)
+}
+
+# Load GA Power bills - USER UPDATE PATH
+# bill_data <- load_ga_power_bills(ga_power_bills_file)
+```
+
+## 1f. Natural Gas Usage Data (MODIFIED - Summer Gas Attribution)
+
+```{r gas_usage_import}
+# Function to load and analyze natural gas usage data
+# EDIT: Note that summer gas includes stove usage, not just water heater
+load_gas_usage_data <- function(file_path = gas_usage_file) {
+  
+  # Load gas usage data
+  gas_data <- read.csv(file_path, stringsAsFactors = FALSE)
+  
+  # Parse dates and clean data
+  gas_data <- gas_data %>%
+    mutate(
+      # Parse bill dates
+      bill_date = as.Date(Bill.Date, format = "%m/%d/%Y"),
+      bill_from_date = as.Date(Bill.From.Date, format = "%m/%d/%Y"),
+      bill_to_date = as.Date(Bill.To.Date, format = "%m/%d/%Y"),
+      
+      # Standardize column names
+      therms_used = Gas.Used..Therms.,
+      heating_degree_days = Heating.Degree.Days,
+      avg_temperature = Average.Temperature,
+      days_of_service = Days.Of.Service,
+      gas_charges = Gas.Charges..Excl..Taxes.,
+      other_charges = Other.Charges,
+      taxes = Taxes,
+      amount_due = Amount.Due,
+      
+      # Calculate derived metrics
+      therms_per_day = therms_used / days_of_service,
+      cost_per_therm = if_else(therms_used > 0, gas_charges / therms_used, NA_real_),
+      total_cost_per_therm = if_else(therms_used > 0, amount_due / therms_used, NA_real_),
+      
+      # Season classification
+      month = month(bill_date),
+      season = case_when(
+        month %in% c(12, 1, 2) ~ "winter",
+        month %in% c(6, 7, 8) ~ "summer", 
+        month %in% c(3, 4, 5) ~ "spring",
+        month %in% c(9, 10, 11) ~ "fall",
+        TRUE ~ "unknown"
+      ),
+      
+      # Heating season flag (when gas usage is primarily for heating)
+      is_heating_season = month %in% c(10, 11, 12, 1, 2, 3),
+      
+      # EDIT: Summer baseline includes both water heater AND cooking stove
+      # Summer months = water heating + cooking (not just water heater)
+      is_baseline_month = month %in% c(6, 7, 8, 9),  # Non-heating months
+      
+      # Calculate degree day efficiency (therms per HDD)
+      efficiency_therms_per_hdd = if_else(heating_degree_days > 0, 
+                                          therms_used / heating_degree_days, 
+                                          NA_real_)
+    ) %>%
+    arrange(bill_date)
+  
+  # Calculate usage baselines for emissions analysis
+  # EDIT: Baseline usage includes water heating AND stove usage
+  baseline_usage <- gas_data %>%
+    filter(is_baseline_month, therms_used > 0) %>%
+    summarise(
+      avg_baseline_therms_per_month = mean(therms_used, na.rm = TRUE),
+      water_heating_plus_stove_annual_estimate = avg_baseline_therms_per_month * 12
+    )
+  
+  # Heating usage calculation (total - baseline)
+  gas_data <- gas_data %>%
+    mutate(
+      # EDIT: Estimate water heating + stove vs space heating split
+      estimated_water_heating_plus_stove_therms = if_else(
+        is_baseline_month, 
+        therms_used,  # Summer usage = water heating + stove
+        baseline_usage$avg_baseline_therms_per_month  # Winter baseline
+      ),
+      estimated_space_heating_therms = pmax(0, therms_used - estimated_water_heating_plus_stove_therms)
+    )
+  
+  # Annual summary calculations
+  annual_summary <- gas_data %>%
+    summarise(
+      total_therms = sum(therms_used, na.rm = TRUE),
+      total_cost = sum(amount_due, na.rm = TRUE),
+      avg_cost_per_therm = mean(total_cost_per_therm, na.rm = TRUE),
+      estimated_water_heating_plus_stove_annual = sum(estimated_water_heating_plus_stove_therms, na.rm = TRUE),
+      estimated_space_heating_annual = sum(estimated_space_heating_therms, na.rm = TRUE),
+      avg_heating_efficiency = mean(efficiency_therms_per_hdd, na.rm = TRUE)
+    )
+  
+  # Data quality and summary output
+  cat("=== NATURAL GAS USAGE ANALYSIS ===\n")
+  cat("Analysis period:", min(gas_data$bill_date), "to", max(gas_data$bill_date), "\n")
+  cat("Total bills analyzed:", nrow(gas_data), "\n")
+  cat("Total annual therms:", round(annual_summary$total_therms, 1), "\n")
+  cat("Total annual gas cost: $", round(annual_summary$total_cost, 2), "\n")
+  cat("Average cost per therm: $", round(annual_summary$avg_cost_per_therm, 3), "\n")
+  
+  cat("\nUSAGE BREAKDOWN (EDITED):\n")
+  cat("NOTE: Summer gas usage includes water heating AND cooking stove\n")
+  cat("Estimated water heating + stove:", round(annual_summary$estimated_water_heating_plus_stove_annual, 1), "therms/year\n")
+  cat("Estimated space heating only:", round(annual_summary$estimated_space_heating_annual, 1), "therms/year\n")
+  cat("Non-heating percentage:", round(annual_summary$estimated_water_heating_plus_stove_annual / annual_summary$total_therms * 100, 1), "%\n")
+  
+  return(gas_data)
+}
+
+# Load gas data - USER UPDATE PATH
+# gas_data <- load_gas_usage_data(gas_usage_file)
+```
+
+## 1g. Data Anomaly Detection (MODIFIED - Remove Synthetic Data Creation)
+
+```{r data_anomaly_detection}
+# Function to detect and flag data anomalies for house efficiency calculations
+# EDIT: Comment out synthetic data creation, use manual event system only
+detect_data_anomalies <- function(energy_data = NULL, ecobee_data = NULL, manual_events = function_variables$manual_events) {
+  
+  cat("=== DATA ANOMALY DETECTION FRAMEWORK ===\n")
+  cat("Using manual event tracking only - no synthetic data generation\n")
+  
+  # Use the manual events from function_variables
+  manual_events_data <- manual_events
+  
+  cat("Manual events configured:\n")
+  print(manual_events_data)
+  
+  # EDIT: Removed the if/else statement that was creating synthetic filter data
+  # Original code was generating placeholder/synthetic anomaly data
+  # Now only using actual user-specified events
+  
+  cat("\nUSER ACTION REQUIRED:\n")
+  cat("1. Update function_variables$manual_events with actual dates\n")
+  cat("2. Set exclude_from_efficiency=TRUE for periods to exclude from analysis\n")
+  cat("3. Add descriptions for each event\n")
+  
+  # Simple data quality checks without synthetic data
+  if(!is.null(energy_data)) {
+    cat("\nDATA QUALITY SUMMARY:\n")
+    cat("Energy data records:", nrow(energy_data), "\n")
+    
+    # Basic quality metrics without generating synthetic anomalies
+    if("total_house_kwh" %in% names(energy_data)) {
+      low_usage_days <- sum(energy_data$total_house_kwh < function_variables$min_daily_kwh, na.rm = TRUE)
+      cat("Low usage periods (< ", function_variables$min_daily_kwh, " kWh):", low_usage_days, "\n")
+    }
+  }
+  
+  if(!is.null(ecobee_data)) {
+    cat("Ecobee data records:", nrow(ecobee_data), "\n")
+  }
+  
+  cat("\nTo exclude periods from efficiency calculations:\n")
+  cat("Filter data using: filter(!date %in% manual_events$date[manual_events$exclude_from_efficiency])\n")
+  
+  return(manual_events_data)
+}
+
+# Placeholder function call
+# anomaly_events <- detect_data_anomalies(emporia_daily, ecobee_data)
+```
+
+## 1h. Water Heater Circuit Analysis (Emporia Integration)
+
+```{r water_heater_circuit_analysis}
+# Function to analyze water heater usage from dedicated Emporia circuit
+analyze_water_heater_circuit <- function(emporia_data, water_heater_circuit_name = function_variables$water_heater_circuit) {
+  
+  cat("=== WATER HEATER CIRCUIT ANALYSIS ===\n")
+  cat("Analyzing dedicated water heater circuit from Emporia data\n")
+  cat("Note: Circuit shared with single exterior power outlet (minimal impact)\n")
+  
+  # Find water heater circuit in Emporia data
+  wh_circuit_names <- grep("water|heater|WH", names(emporia_data), value = TRUE, ignore.case = TRUE)
+  
+  if(length(wh_circuit_names) > 0) {
+    cat("Found potential water heater circuits:\n")
+    print(wh_circuit_names)
+    cat("USER ACTION: Verify correct circuit name and update function_variables$water_heater_circuit\n")
+  } else {
+    cat("No water heater circuit found. Check circuit naming in Emporia data.\n")
+    cat("Common names: 'Water_Heater', 'WH', 'Hot_Water', etc.\n")
+  }
+  
+  cat("\nAnalysis will provide:\n")
+  cat("- Electrical consumption patterns of gas water heater (pilot, controls, circulation)\n")
+  cat("- Validation of gas usage calculations (electrical should be minimal for gas unit)\n")
+  cat("- Heat pump water heater conversion baseline\n")
+  cat("- Power requirements for heat pump sizing\n")
+  
+  analysis_framework <- list(
+    circuit_identification_needed = TRUE,
+    analysis_type = "gas_water_heater_electrical_validation",
+    expected_usage = "minimal_electrical_for_gas_unit",
+    conversion_baseline = "for_heat_pump_water_heater_sizing"
+  )
+  
+  return(analysis_framework)
+}
+
+# USER ACTION: Update circuit name and execute
+# wh_analysis <- analyze_water_heater_circuit(emporia_daily, function_variables$water_heater_circuit)
+```
+
+## 1i. Temperature Logger Data (Building Envelope Analysis)
+
+```{r temperature_logger_data}
+# Function to load and analyze temperature logger data for building envelope efficiency
+load_temperature_logger_data <- function(file_path = temp_logger_file) {
+  
+  cat("=== TEMPERATURE LOGGER DATA FRAMEWORK ===\n")
+  cat("Data sources: Crawlspace (post-encapsulation), Attic, Various locations\n")
+  cat("Primary use: Building envelope efficiency analysis\n")
+  
+  # Temperature logger data structure (placeholder)
+  logger_locations <- data.frame(
+    location = c("crawlspace_encapsulated", "attic", "outdoor", "various_spots"),
+    measurement_type = c("post_encapsulation_validation", "attic_efficiency", "reference", "envelope_testing"),
+    data_availability = c("longest_dataset", "limited_periods", "weather_correlation", "scattered_readings"),
+    primary_use = c("encapsulation_effectiveness", "insulation_analysis", "degree_day_validation", "thermal_bridging"),
+    stringsAsFactors = FALSE
+  )
+  
+  cat("Temperature logger framework:\n")
+  print(logger_locations)
+  
+  if(!is.null(file_path)) {
+    cat("Loading temperature data from:", file_path, "\n")
+    # Actual import logic would go here
+  } else {
+    cat("No file path provided. Framework ready for data upload.\n")
+  }
+  
+  temp_analysis_framework <- list(
+    crawlspace_encapsulation_validation = "effectiveness_of_completed_work",
+    attic_efficiency_analysis = "insulation_upgrade_potential", 
+    hvac_correlation_with_ecobee = "envelope_impact_on_system_efficiency",
+    solar_panel_temperature_modeling = "production_optimization"
+  )
+  
+  return(temp_analysis_framework)
+}
+
+# USER ACTION: Provide file path when data available
+# temp_logger_analysis <- load_temperature_logger_data()
+```
+
+# 2. Solar System Sizing and Configuration
+
+```{r solar_system_sizing}
+# Function to calculate optimal solar system size based on consumption patterns
+calculate_solar_system_size <- function(annual_kwh_consumption = function_variables$annual_consumption_baseline, 
+                                        roof_characteristics = NULL,
+                                        offset_percentage = function_variables$solar_offset_target) {
+  
+  cat("=== SOLAR SYSTEM SIZING ANALYSIS ===\n")
+  cat("Annual consumption baseline:", annual_kwh_consumption, "kWh\n")
+  cat("Target offset percentage:", offset_percentage * 100, "%\n")
+  
+  # Solar production estimates (Georgia, west-facing roof)
+  # Based on PVWatts estimates for Decatur, GA
+  production_per_kw_west_facing <- function_variables$production_per_kw_west
+  
+  # Calculate required system size
+  target_annual_production <- annual_kwh_consumption * offset_percentage
+  required_system_size_kw <- target_annual_production / production_per_kw_west_facing
+  
+  # Panel and system specifications
+  panel_wattage_options <- function_variables$panel_wattage_options
+  
+  # Calculate panel counts for different options
+  system_options <- data.frame(
+    panel_wattage = panel_wattage_options,
+    panels_needed = ceiling((required_system_size_kw * 1000) / panel_wattage_options),
+    actual_system_size_kw = (ceiling((required_system_size_kw * 1000) / panel_wattage_options) * panel_wattage_options) / 1000,
+    estimated_annual_production = ((ceiling((required_system_size_kw * 1000) / panel_wattage_options) * panel_wattage_options) / 1000) * production_per_kw_west_facing,
+    offset_percentage = (((ceiling((required_system_size_kw * 1000) / panel_wattage_options) * panel_wattage_options) / 1000) * production_per_kw_west_facing) / annual_kwh_consumption
+  )
+  
+  cat("\nSOLAR SYSTEM OPTIONS:\n")
+  print(system_options)
+  
+  # Recommended system (closest to target without under-sizing)
+  recommended_option <- system_options[which.min(abs(system_options$offset_percentage - offset_percentage)), ]
+  
+  cat("\nRECOMMENDED SYSTEM:\n")
+  cat("Panel wattage:", recommended_option$panel_wattage, "W\n")
+  cat("Number of panels:", recommended_option$panels_needed, "\n")
+  cat("System size:", round(recommended_option$actual_system_size_kw, 2), "kW\n")
+  cat("Estimated annual production:", round(recommended_option$estimated_annual_production, 0), "kWh\n")
+  cat("Offset percentage:", round(recommended_option$offset_percentage * 100, 1), "%\n")
+  
+  return(system_options)
+}
+
+# Calculate system sizing
+system_options <- calculate_solar_system_size(function_variables$annual_consumption_baseline,
+                                             offset_percentage = function_variables$solar_offset_target)
+```
+
+## 2b. Battery Storage Analysis
+
+```{r battery_storage_analysis}
+# Function to analyze battery storage requirements and cost-benefit
+analyze_battery_storage <- function(emporia_data = NULL, 
+                                    ecobee_data = NULL,
+                                    backup_requirements = "essential_loads") {
+  
+  cat("=== BATTERY STORAGE DECISION ANALYSIS ===\n")
+  
+  # Define backup scenarios using function_variables
+  backup_scenarios <- function_variables$battery_scenarios
+  
+  cat("Battery storage scenarios:\n")
+  print(backup_scenarios)
+  
+  # Power outage analysis (requires manual event data)
+  cat("\nPOWER OUTAGE CONSIDERATIONS:\n")
+  cat("- Recent power outages during heat storms (user reported)\n")
+  cat("- Georgia Power grid reliability analysis needed\n")
+  cat("- Emergency power vs economic arbitrage trade-offs\n")
+  
+  # Sunlight Backup specific analysis
+  cat("\nSUNLIGHT BACKUP OPTIONS:\n")
+  cat("- Backup load panel integration\n")
+  cat("- Essential circuit prioritization\n")
+  cat("- Generator integration capability\n")
+  cat("- Time-of-use arbitrage potential\n")
+  
+  # Economic analysis framework
+  cat("\nECONOMIC CONSIDERATIONS:\n")
+  cat("- Battery cost: $400-600/kWh installed\n")
+  cat("- Federal tax credit applies (30% through 2025)\n")
+  cat("- GA Power time-of-use rate optimization\n")
+  cat("- Backup power value during outages\n")
+  
+  # Return analysis framework
+  battery_analysis <- list(
+    scenarios = backup_scenarios,
+    power_outage_frequency = "user_input_required",
+    essential_loads_calculation = "from_emporia_circuit_analysis",
+    economic_analysis = "integrate_with_financial_component"
+  )
+  
+  return(battery_analysis)
+}
+
+# Battery storage analysis - can use high-resolution data for LRA analysis
+# battery_analysis <- analyze_battery_storage(emporia_daily, ecobee_data, "essential_loads")
+# For LRA/surge analysis: analyze_battery_storage(emporia_1min, ecobee_data, "essential_loads")
+```
+
+## 2c. Heat Pump Sizing and Configuration
+
+```{r heat_pump_sizing}
+# Function to size heat pumps for space and water heating conversion
+analyze_heat_pump_conversion <- function(gas_data, ecobee_data = NULL, climate_zone = function_variables$climate_zone) {
+  
+  cat("=== HEAT PUMP CONVERSION ANALYSIS ===\n")
+  cat("Climate zone:", climate_zone, "(Georgia - Mixed Humid)\n")
+  
+  # Extract gas usage breakdown
+  if(!is.null(gas_data)) {
+    annual_therms <- sum(gas_data$therms_used, na.rm = TRUE)
+    water_heating_plus_stove_therms <- sum(gas_data$estimated_water_heating_plus_stove_therms, na.rm = TRUE)
+    space_heating_therms <- sum(gas_data$estimated_space_heating_therms, na.rm = TRUE)
+    
+    cat("Current gas usage:\n")
+    cat("- Total annual therms:", round(annual_therms, 1), "\n")
+    cat("- Water heating + stove:", round(water_heating_plus_stove_therms, 1), "therms/year\n")
+    cat("- Space heating only:", round(space_heating_therms, 1), "therms/year\n")
+  }
+  
+  # Heat pump water heater sizing
+  cat("\nHEAT PUMP WATER HEATER:\n")
+  cat("- Typical efficiency:", function_variables$hpwh_cop, "COP\n")
+  cat("- Gas to electric conversion factor:", function_variables$gas_to_electric_conversion, "kWh/therm equivalent\n")
+  if(!is.null(gas_data)) {
+    # Note: Only water heating portion for HPWH (exclude stove)
+    water_heating_only_therms <- water_heating_plus_stove_therms * 0.8  # Estimate 80% for water heating
+    hpwh_annual_kwh <- water_heating_only_therms * function_variables$gas_to_electric_conversion / function_variables$hpwh_cop
+    cat("- Estimated water heating only:", round(water_heating_only_therms, 1), "therms/year\n")
+    cat("- Estimated annual electricity:", round(hpwh_annual_kwh, 0), "kWh\n")
+    cat("- Load increase for solar sizing: +", round(hpwh_annual_kwh, 0), "kWh/year\n")
+  }
+  
+  # Heat pump HVAC sizing
+  cat("\nHEAT PUMP HVAC:\n")
+  cat("- Requires load calculation for proper sizing\n")
+  cat("- Current system age: 2010 AC, 2009 heating (replacement due)\n")
+  cat("- Efficiency improvements from envelope work will reduce load\n")
+  if(!is.null(gas_data)) {
+    hvac_annual_kwh <- space_heating_therms * function_variables$gas_to_electric_conversion / function_variables$hp_heating_hspf_equiv
+    cat("- Estimated heating electricity:", round(hvac_annual_kwh, 0), "kWh/year\n")
+    cat("- Combined heating/cooling load for solar sizing\n")
+  }
+  
+  # Integration with existing systems
+  cat("\nSYSTEM INTEGRATION:\n")
+  cat("- ", function_variables$target_panel_amps, "A panel upgrade required for heat pump loads\n")
+  cat("- Current panel:", function_variables$current_panel_amps, "A\n")
+  cat("- Existing ductwork assessment needed\n")
+  cat("- Emergency heat backup considerations\n")
+  cat("- Refrigerant line modifications\n")
+  
+  # Return sizing estimates
+  heat_pump_analysis <- list(
+    water_heater_annual_kwh = if(!is.null(gas_data)) round(water_heating_plus_stove_therms * 0.8 * function_variables$gas_to_electric_conversion / function_variables$hpwh_cop, 0) else NA,
+    space_heating_annual_kwh = if(!is.null(gas_data)) round(space_heating_therms * function_variables$gas_to_electric_conversion / function_variables$hp_heating_hspf_equiv, 0) else NA,
+    total_additional_load_kwh = if(!is.null(gas_data)) {
+      wh_kwh <- water_heating_plus_stove_therms * 0.8 * function_variables$gas_to_electric_conversion / function_variables$hpwh_cop
+      sh_kwh <- space_heating_therms * function_variables$gas_to_electric_conversion / function_variables$hp_heating_hspf_equiv
+      round(wh_kwh + sh_kwh, 0)
+    } else NA,
+    panel_upgrade_required = TRUE,
+    load_calculation_needed = TRUE
+  )
+  
+  return(heat_pump_analysis)
+}
+
+# Heat pump conversion analysis
+# heat_pump_analysis <- analyze_heat_pump_conversion(gas_data, ecobee_data)
+```
+
+# 3. Export Data for Financial and Emissions Components
+
+```{r export_house_profile}
+# Function to compile and export house profile data for other components
+compile_house_profile <- function(emporia_data = NULL, 
+                                  ecobee_data = NULL,
+                                  ga_power_data = NULL,
+                                  bill_data = NULL,
+                                  gas_data = NULL,
+                                  system_options = NULL,
+                                  battery_analysis = NULL,
+                                  heat_pump_analysis = NULL) {
+  
+  cat("=== COMPILING HOUSE PROFILE FOR EXPORT ===\n")
+  
+  # Baseline energy consumption
+  baseline_consumption <- list(
+    annual_kwh_electric = function_variables$annual_consumption_baseline,
+    annual_therms_gas = if(!is.null(gas_data)) sum(gas_data$therms_used, na.rm = TRUE) else NA,
+    daily_avg_kwh = function_variables$annual_consumption_baseline / 365,
+    major_loads = list(
+      ac_percent = 29.8,
+      heating_percent = 15.0,
+      other_percent = 55.2
+    )
+  )
+  
+  # Solar system recommendations
+  solar_recommendations <- if(!is.null(system_options)) {
+    recommended <- system_options[which.min(abs(system_options$offset_percentage - function_variables$solar_offset_target)), ]
+    list(
+      recommended_size_kw = recommended$actual_system_size_kw,
+      panel_count = recommended$panels_needed,
+      panel_wattage = recommended$panel_wattage,
+      annual_production_kwh = recommended$estimated_annual_production,
+      offset_percentage = recommended$offset_percentage
+    )
+  } else {
+    list(
+      recommended_size_kw = 3.8,
+      panel_count = 10,
+      panel_wattage = 380,
+      annual_production_kwh = function_variables$annual_consumption_baseline,
+      offset_percentage = 1.0
+    )
+  }
+  
+  # Heat pump load additions
+  heat_pump_loads <- if(!is.null(heat_pump_analysis)) {
+    list(
+      water_heater_additional_kwh = heat_pump_analysis$water_heater_annual_kwh,
+      space_heating_additional_kwh = heat_pump_analysis$space_heating_annual_kwh,
+      total_additional_kwh = heat_pump_analysis$total_additional_load_kwh
+    )
+  } else {
+    list(
+      water_heater_additional_kwh = 2400,  # Estimate
+      space_heating_additional_kwh = 5000,  # Estimate
+      total_additional_kwh = 7400
+    )
+  }
+  
+  # Current infrastructure status
+  infrastructure_status <- list(
+    panel_upgrade_required = TRUE,
+    current_panel_amps = function_variables$current_panel_amps,
+    target_panel_amps = function_variables$target_panel_amps,
+    roof_solar_ready = function_variables$solar_ready_completed,
+    roof_orientation = function_variables$roof_orientation,
+    crawlspace_encapsulated = TRUE,
+    efficiency_improvements_completed = c("new_roof", "crawlspace_encapsulation", "tree_trimming")
+  )
+  
+  # Rate structure analysis
+  rate_analysis <- if(!is.null(bill_data)) {
+    annual_summary <- bill_data %>%
+      summarise(
+        avg_rate = mean(implied_rate_per_kwh, na.rm = TRUE),
+        solar_offset_potential_pct = mean(solar_offset_potential_pct, na.rm = TRUE),
+        total_fixed_fees_annual = sum(total_fixed_fees, na.rm = TRUE),
+        total_bill_annual = sum(total_bill, na.rm = TRUE)
+      )
+    list(
+      avg_electric_rate = annual_summary$avg_rate,
+      solar_offset_potential = annual_summary$solar_offset_potential_pct / 100,
+      fixed_fees_annual = annual_summary$total_fixed_fees_annual,
+      total_electric_bill_annual = annual_summary$total_bill_annual
+    )
+  } else {
+    list(
+      avg_electric_rate = 0.12,
+      solar_offset_potential = 0.70,
+      fixed_fees_annual = 500,
+      total_electric_bill_annual = 1200
+    )
+  }
+  
+  # Compile complete house profile
+  house_profile <- list(
+    baseline_consumption = baseline_consumption,
+    solar_recommendations = solar_recommendations,
+    heat_pump_loads = heat_pump_loads,
+    infrastructure_status = infrastructure_status,
+    rate_analysis = rate_analysis,
+    battery_analysis = battery_analysis,
+    data_quality_validated = TRUE,
+    analysis_date = Sys.Date(),
+    function_variables_used = function_variables
+  )
+  
+  # Save to RData file for other components
+  cat("Saving house profile to house_profile.RData\n")
+  save(house_profile, file = file.path(output_dir, "house_profile.RData"))
+  
+  cat("\n=== HOUSE PROFILE SUMMARY ===\n")
+  cat("Baseline consumption:", house_profile$baseline_consumption$annual_kwh_electric, "kWh/year\n")
+  cat("Recommended solar:", house_profile$solar_recommendations$recommended_size_kw, "kW\n")
+  cat("Heat pump additional load:", house_profile$heat_pump_loads$total_additional_kwh, "kWh/year\n")
+  cat("Solar offset potential:", round(house_profile$rate_analysis$solar_offset_potential * 100, 1), "% of bill\n")
+  
+  return(house_profile)
+}
+
+# Compile and export house profile
+# house_profile <- compile_house_profile(emporia_daily, ecobee_data, ga_power_data, 
+#                                       bill_data, gas_data, system_options, 
+#                                       battery_analysis, heat_pump_analysis)
+```
+
+# Usage Instructions
+
+```{r usage_instructions}
+cat("=== HOUSE COMPONENT USAGE INSTRUCTIONS V9 ===\n\n")
+
+cat("1. CONFIGURATION:\n")
+cat("   - Review and update function_variables parameters\n")
+cat("   - File paths are now configured with actual data filenames\n")
+cat("   - Update manual_events with actual dates and descriptions\n\n")
+
+cat("2. DATA IMPORT:\n")
+cat("   - Execute data import functions in order\n")
+cat("   - All circuit data and variables are preserved\n")
+cat("   - Multiple Emporia resolutions available (1SEC through 1DAY)\n")
+cat("   - Use emporia_daily for system sizing, emporia_1min for LRA analysis\n\n")
+
+cat("3. KEY CHANGES IN V9:\n")
+cat("   - Fixed caching issues with correct file paths\n")
+cat("   - Multi-resolution Emporia data loading\n")
+cat("   - dirname() working directory approach\n")
+cat("   - All variables preserved from input data\n")
+cat("   - LRA and battery optimization capability\n\n")
+
+cat("4. MULTI-RESOLUTION ANALYSIS:\n")
+cat("   - 1SEC/1MIN: LRA detection, battery power sizing\n")
+cat("   - 15MIN/1H: Solar matching, time-of-use optimization\n")
+cat("   - 1DAY: Annual energy balance, system sizing\n\n")
+
+cat("5. SYSTEM SIZING:\n")
+cat("   - Run solar system sizing with consumption baseline\n")
+cat("   - Battery analysis with high-resolution data capability\n")
+cat("   - Heat pump conversion load calculations\n\n")
+
+cat("6. EXPORT FOR OTHER COMPONENTS:\n")
+cat("   - Execute compile_house_profile() to create house_profile.RData\n")
+cat("   - Includes all analysis results and function_variables used\n\n")
+
+cat("OUTPUT: Complete house_profile.RData for financial and emissions components\n")
+```
+
+
+# 4. Graphing and Basic analysis
+## 4a. Emporia usage data
+ -graphing and summary stats
+```{r}
+# Daily Energy Usage Analysis with ggplot2
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(lubridate)
+
+# Prepare data for plotting
+emporia_plot_data <- emporia_daily %>%
+  mutate(
+    # Combine AC and fridge usage
+    ac_fridge_kwh = `Air_Conditioner_17_19__AC_kwh` + `Fridge_Freezer_10__Fridge_and_outlets_kwh`,
+    
+    # Add date components for analysis
+    month = floor_date(datetime, "month"),
+    week_day = wday(datetime, label = TRUE),
+    month_name = month(datetime, label = TRUE)
+  ) %>%
+  # Remove any rows with missing data
+  filter(!is.na(total_house_kwh), !is.na(ac_fridge_kwh))
+
+# Create the plot
+daily_usage_plot <- ggplot(emporia_plot_data, aes(x = datetime)) +
+  geom_line(aes(y = total_house_kwh, color = "Total House Usage"), 
+            size = 0.8, alpha = 0.8) +
+  geom_line(aes(y = ac_fridge_kwh, color = "AC + Fridge"), 
+            size = 0.7, alpha = 0.9) +
+  
+  # Formatting
+  scale_color_manual(
+    values = c("Total House Usage" = "#2E86AB", "AC + Fridge" = "#F24236"),
+    name = "Usage Type"
+  ) +
+  
+  # X-axis formatting - monthly major breaks
+  scale_x_datetime(
+    breaks = date_breaks("1 month"),
+    labels = date_format("%b %Y"),
+    minor_breaks = date_breaks("1 week")
+  ) +
+  
+  # Y-axis formatting
+  scale_y_continuous(
+    breaks = pretty_breaks(n = 8),
+    labels = comma_format(suffix = " kWh")
+  ) +
+  
+  # Labels and theme
+  labs(
+    title = "Daily Energy Usage - Total vs AC+Fridge",
+    subtitle = "2265 Ridgedale Road, Decatur GA",
+    x = "Date",
+    y = "Daily Energy Usage (kWh)",
+    caption = paste("Data range:", min(emporia_plot_data$datetime), "to", max(emporia_plot_data$datetime))
+  ) +
+  
+  # Clean theme
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    axis.text.y = element_text(size = 10),
+    legend.position = "top",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "gray60"),
+    panel.grid.minor = element_line(color = "gray90", size = 0.3),
+    panel.grid.major = element_line(color = "gray80", size = 0.5)
+  )
+
+# Display the plot
+print(daily_usage_plot)
+
+# Summary statistics for peak usage analysis
+cat("=== DAILY USAGE SUMMARY STATISTICS ===\n")
+
+usage_stats <- emporia_plot_data %>%
+  summarise(
+    # Total usage stats
+    total_mean = mean(total_house_kwh, na.rm = TRUE),
+    total_median = median(total_house_kwh, na.rm = TRUE),
+    total_max = max(total_house_kwh, na.rm = TRUE),
+    total_min = min(total_house_kwh, na.rm = TRUE),
+    
+    # AC + Fridge stats
+    ac_fridge_mean = mean(ac_fridge_kwh, na.rm = TRUE),
+    ac_fridge_median = median(ac_fridge_kwh, na.rm = TRUE),
+    ac_fridge_max = max(ac_fridge_kwh, na.rm = TRUE),
+    
+    # Percentage calculations
+    ac_fridge_pct_of_total = (mean(ac_fridge_kwh, na.rm = TRUE) / mean(total_house_kwh, na.rm = TRUE)) * 100,
+    
+    # Date range
+    date_range_days = as.numeric(difftime(max(datetime), min(datetime), units = "days"))
+  )
+
+print(usage_stats)
+
+# Peak usage days identification
+peak_days <- emporia_plot_data %>%
+  arrange(desc(total_house_kwh)) %>%
+  slice_head(n = 10) %>%
+  select(datetime, total_house_kwh, ac_fridge_kwh, month_name, week_day) %>%
+  mutate(
+    ac_fridge_pct = round((ac_fridge_kwh / total_house_kwh) * 100, 1)
+  )
+
+cat("\n=== TOP 10 PEAK USAGE DAYS ===\n")
+print(peak_days)
+
+# Monthly usage patterns
+monthly_stats <- emporia_plot_data %>%
+  group_by(month_name) %>%
+  summarise(
+    days = n(),
+    avg_total = round(mean(total_house_kwh, na.rm = TRUE), 2),
+    avg_ac_fridge = round(mean(ac_fridge_kwh, na.rm = TRUE), 2),
+    ac_fridge_pct = round((mean(ac_fridge_kwh, na.rm = TRUE) / mean(total_house_kwh, na.rm = TRUE)) * 100, 1),
+    max_day = round(max(total_house_kwh, na.rm = TRUE), 2),
+    .groups = 'drop'
+  ) %>%
+  arrange(match(month_name, month.abb))
+
+monthly_stats <- monthly_stats %>%
+  rename(
+    "Month" = month_name,
+    "Daily Average kWh" = avg_total,
+    "Daily Average of Fridge and AC" = avg_ac_fridge,
+    "AC & Fridge %" = ac_fridge_pct,
+    "Peak Day kWh" = max_day
+  )
+
+
+cat("\n=== MONTHLY USAGE PATTERNS ===\n")
+print(monthly_stats)
+
+# Weekend vs weekday analysis
+day_type_stats <- emporia_plot_data %>%
+  mutate(day_type = if_else(week_day %in% c("Sat", "Sun"), "Weekend", "Weekday")) %>%
+  group_by(day_type) %>%
+  summarise(
+    avg_total = round(mean(total_house_kwh, na.rm = TRUE), 2),
+    avg_ac_fridge = round(mean(ac_fridge_kwh, na.rm = TRUE), 2),
+    ac_fridge_pct = round((mean(ac_fridge_kwh, na.rm = TRUE) / mean(total_house_kwh, na.rm = TRUE)) * 100, 1),
+    .groups = 'drop'
+  )
+
+cat("\n=== WEEKDAY VS WEEKEND USAGE ===\n")
+print(day_type_stats)
+```
+ - export tables
+```{r}
+# TABLE EXPORT METHODS FOR R SUMMARY STATISTICS
+library(knitr)
+library(kableExtra)
+library(writexl)
+library(readr)
+
+# === METHOD 1: CSV EXPORT (Best for data sharing) ===
+# Export usage_stats to CSV
+write_csv(usage_stats, "output/daily_usage_summary.csv")
+write_csv(peak_days, "output/peak_usage_days.csv")
+write_csv(monthly_stats, "output/monthly_usage_patterns.csv")
+write_csv(day_type_stats, "output/weekday_weekend_comparison.csv")
+
+cat("CSV files exported to output/ directory\n")
+
+# === METHOD 2: EXCEL EXPORT (Best for formatted sharing) ===
+# Create list of tables for multi-sheet Excel file
+table_list <- list(
+  "Summary_Stats" = usage_stats,
+  "Peak_Days" = peak_days,
+  "Monthly_Patterns" = monthly_stats,
+  "Day_Type_Comparison" = day_type_stats
+)
+
+# Export to Excel with multiple sheets
+write_xlsx(table_list, "output/energy_usage_analysis.xlsx")
+
+cat("Excel file with multiple sheets exported: energy_usage_analysis.xlsx\n")
+
+# === METHOD 3: FORMATTED CONSOLE OUTPUT (Copy-paste friendly) ===
+# Better formatted output for copying
+cat("\n=== COPY-PASTE FRIENDLY SUMMARY ===\n")
+print(kable(usage_stats, 
+            digits = 2, 
+            col.names = c("Total Mean", "Total Median", "Total Max", "Total Min",
+                         "AC+Fridge Mean", "AC+Fridge Median", "AC+Fridge Max", 
+                         "AC+Fridge %", "Days in Dataset"),
+            caption = "Daily Energy Usage Summary Statistics"))
+
+# === METHOD 4: HTML TABLE (For reports/emails) ===
+# Create formatted HTML table
+html_table <- usage_stats %>%
+  kable(digits = 2, 
+        col.names = c("Total Mean (kWh)", "Total Median (kWh)", "Total Max (kWh)", 
+                     "Total Min (kWh)", "AC+Fridge Mean (kWh)", "AC+Fridge Median (kWh)", 
+                     "AC+Fridge Max (kWh)", "AC+Fridge % of Total", "Dataset Days"),
+        caption = "Daily Energy Usage Summary - Ridgedale Road") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+                full_width = FALSE,
+                position = "center") %>%
+  row_spec(0, bold = TRUE, background = "#f8f9fa")
+
+# Save HTML table
+writeLines(as.character(html_table), "output/usage_summary_table.html")
+
+# === METHOD 5: TRANSPOSED TABLE (Easier to read) ===
+# Transpose for better readability
+usage_stats_transposed <- usage_stats %>%
+  gather(key = "Metric", value = "Value") %>%
+  mutate(
+    Value = round(Value, 2),
+    Metric = case_when(
+      Metric == "total_mean" ~ "Average Daily Usage (kWh)",
+      Metric == "total_median" ~ "Median Daily Usage (kWh)", 
+      Metric == "total_max" ~ "Peak Daily Usage (kWh)",
+      Metric == "total_min" ~ "Minimum Daily Usage (kWh)",
+      Metric == "ac_fridge_mean" ~ "Average AC+Fridge (kWh)",
+      Metric == "ac_fridge_median" ~ "Median AC+Fridge (kWh)",
+      Metric == "ac_fridge_max" ~ "Peak AC+Fridge (kWh)",
+      Metric == "ac_fridge_pct_of_total" ~ "AC+Fridge % of Total",
+      Metric == "date_range_days" ~ "Days in Dataset",
+      TRUE ~ Metric
+    )
+  )
+
+cat("\n=== TRANSPOSED SUMMARY TABLE ===\n")
+print(kable(usage_stats_transposed, 
+            col.names = c("Energy Metric", "Value"),
+            caption = "Energy Usage Analysis Summary"))
+
+# Export transposed version
+write_csv(usage_stats_transposed, "output/usage_summary_transposed.csv")
+
+# === METHOD 6: FORMATTED TEXT SUMMARY (For reports) ===
+cat("\n=== FORMATTED TEXT SUMMARY ===\n")
+cat("ENERGY USAGE ANALYSIS SUMMARY\n")
+cat("=============================\n")
+cat(sprintf("Average daily usage: %.1f kWh\n", usage_stats$total_mean))
+cat(sprintf("Peak daily usage: %.1f kWh\n", usage_stats$total_max))
+cat(sprintf("AC + Fridge average: %.1f kWh (%.1f%% of total)\n", 
+            usage_stats$ac_fridge_mean, usage_stats$ac_fridge_pct_of_total))
+cat(sprintf("Analysis period: %d days\n", usage_stats$date_range_days))
+
+# === METHOD 7: CREATE ALL EXPORTS WITH ONE FUNCTION ===
+export_all_tables <- function() {
+  
+  # Create output directory if it doesn't exist
+  if(!dir.exists("output")) dir.create("output")
+  
+  # CSV exports
+  write_csv(usage_stats, "output/01_daily_usage_summary.csv")
+  write_csv(peak_days, "output/02_peak_usage_days.csv") 
+  write_csv(monthly_stats, "output/03_monthly_usage_patterns.csv")
+  write_csv(day_type_stats, "output/04_weekday_weekend_comparison.csv")
+  
+  # Excel export (multi-sheet)
+  table_list <- list(
+    "Daily_Summary" = usage_stats,
+    "Peak_Days" = peak_days,
+    "Monthly_Patterns" = monthly_stats,
+    "Weekend_vs_Weekday" = day_type_stats
+  )
+  write_xlsx(table_list, "output/energy_usage_complete_analysis.xlsx")
+  
+  # Summary report
+  cat("All tables exported successfully!\n")
+  cat("Files created:\n")
+  cat("- CSV files: 01-04_*.csv\n") 
+  cat("- Excel file: energy_usage_complete_analysis.xlsx\n")
+  cat("- Location: output/ directory\n")
+}
+
+# Run the export function
+export_all_tables()
+
+# === QUICK SHARING FORMAT ===
+cat("\n=== QUICK SHARE FORMAT ===\n")
+cat("Daily Usage: Avg=", round(usage_stats$total_mean,1), "kWh, Peak=", round(usage_stats$total_max,1), "kWh\n")
+cat("AC+Fridge: Avg=", round(usage_stats$ac_fridge_mean,1), "kWh (", round(usage_stats$ac_fridge_pct_of_total,1), "% of total)\n")
+```
+
+ 

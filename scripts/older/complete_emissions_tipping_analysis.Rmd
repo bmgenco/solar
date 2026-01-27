@@ -1,0 +1,1235 @@
+---
+title: "Complete Emissions Analysis with Radiative Forcing and Tipping Points"
+subtitle: "2265 Ridgedale Road - Objective Data for Climate Decision Framework"
+author: "Three-Component Decision Framework - Emissions Analysis"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: show
+---
+
+<!--
+COMPLETE DOWNSTREAM EMISSIONS ANALYSIS - RADIATIVE FORCING & TIPPING POINTS
+================================================================================
+Property: 2265 Ridgedale Road, Decatur GA (DeKalb County)
+Analysis Framework: Dual cost-effectiveness metrics for climate tipping points
+Priorities: Objective data presentation - no predetermined conclusions
+
+METHODOLOGY:
+- Complete supply chain emissions (all downstream components)
+- GA Power dispatch modeling with upstream methane
+- Radiative forcing analysis: CO2 vs methane separation
+- Dual metrics: Standard $/ton CO2e vs $/forcing unit (tipping points)
+- Time-integrated climate impact (20-year critical window)
+
+KEY TECHNICAL FEATURES:
+- Natural gas: 4.5% methane leakage rate (atmospheric studies, not EPA 2.5%)
+- Grid: Complete upstream emissions for all generation types
+- Battery: True dispatch-based load shifting value
+- Radiative forcing: IPCC AR6 GWP values, methane decay modeling
+- Manufacturing LCA: Complete cradle-to-grave with electrical service
+
+CRITICAL CITATIONS:
+- Methane leakage: Alvarez Nature (2024), Chen Nature (2022)
+- Grid emissions: GA Power IRP 2025, EPA eGRID 2022
+- GWP values: IPCC AR6 Working Group I (2021)
+- Manufacturing: NREL LCA Harmonization (2021)
+- Radiative forcing: IPCC AR6 methodology
+
+DATA PRESENTATION:
+- Standard cost-effectiveness ranking (economic perspective)
+- Radiative forcing cost-effectiveness (tipping points perspective)
+- Methane vs CO2 impact separation over time
+- Battery dispatch analysis with complete upstream
+- Decision framework data without interpretation
+
+Tax Credit Deadline: December 31, 2025
+================================================================================
+-->
+
+```{r setup, include=FALSE}
+# Clear environment and set up working directories
+rm(list=ls())
+
+# Set working directory relative to .Rmd location
+r_scriptwd <- getwd()
+wd <- dirname(r_scriptwd)  # solar/scripts/ → solar/
+knitr::opts_knit$set(root.dir = wd)
+
+# Set relative directories from solar/
+data_dir <- "data"
+ecobee_dir <- file.path(data_dir, "ecobee")
+output_dir <- "output"
+fig_dir <- "figures"
+
+# Create directories if they don't exist
+if(!dir.exists(output_dir)) dir.create(output_dir)
+if(!dir.exists(fig_dir)) dir.create(fig_dir)
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.width = 12, fig.height = 8)
+
+# Package management function
+f.ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+# Load required libraries
+packages <- c("tidyverse", "lubridate", "plotly", "DT", "kableExtra", "viridis", "patchwork", "scales", "ggrepel")
+f.ipak(packages)
+
+```
+
+
+```{r}
+# Load validated house data
+if(!file.exists(file.path(output_dir, "house_profile.RData"))) {
+  stop("house_profile.RData not found. Run House Component analysis first.")
+}
+load(file.path(output_dir, "house_profile.RData"))
+
+cat("=== COMPLETE DOWNSTREAM EMISSIONS WITH RADIATIVE FORCING ===\n")
+cat("House profile version:", house_profile$version, "\n")
+cat("Analysis approach: Objective data presentation for tipping points consideration\n\n")
+```
+
+
+# 1. Complete Supply Chain Emissions Factors with Citations
+
+```{r emissions_factors_complete}
+# COMPLETE EMISSIONS FACTORS - ALL SUPPLY CHAIN COMPONENTS WITH CITATIONS
+emissions_factors_complete <- list(
+  
+  # NATURAL GAS COMPLETE SUPPLY CHAIN
+  gas_supply_chain = list(
+    # Direct combustion - EPA GHG Emissions Factors Hub 2024
+    co2_per_therm_combustion = 11.7,  # lbs CO2/therm
+    
+    # Upstream CO2 (processing, compression, transport) - NETL 2019
+    upstream_co2_per_therm = 1.8,    # lbs CO2/therm
+    
+    # METHANE LEAKAGE RATES - Comprehensive literature review
+    # CRITICAL: EPA estimates systematically underestimate actual leakage
+    methane_leakage_epa = 0.025,     # 2.5% - EPA Natural Gas STAR (bottom-up, conservative)
+    methane_leakage_atmospheric = 0.045,  # 4.5% - Alvarez et al. Nature 2024 (top-down, realistic)
+    methane_leakage_satellite = 0.065,    # 6.5% - Chen et al. Nature 2022 (satellite, high-end)
+    
+    # IPCC AR6 methane parameters - Working Group I, Chapter 7
+    ch4_gwp_20yr = 84,   # Near-term tipping points metric (critical for urgent climate response)
+    ch4_gwp_100yr = 28,  # Traditional long-term climate metric
+    ch4_atmospheric_lifetime = 9.5,  # years (rapid decay vs CO2 centuries)
+    
+    # Molecular weight conversion (CH4 mass per therm of gas consumed)
+    ch4_lbs_per_therm = 2.5,  # ~2.5 lbs CH4 per therm combusted
+    
+    citation_combustion = "EPA GHG Emissions Factors Hub 2024. Natural gas combustion: 11.7 lbs CO2/therm.",
+    citation_upstream = "NETL 2019. Natural gas supply chain CO2: 1.8 lbs CO2/therm (processing, compression, transport).",
+    citation_methane = "Methane leakage literature: EPA 2.5% (underestimate), Alvarez Nature 2024 4.5% (realistic), Chen Nature 2022 6.5% (satellite). Using 4.5% atmospheric studies.",
+    citation_gwp = "IPCC AR6 Working Group I (2021), Table 7.15. Methane GWP: 84 (20-year), 28 (100-year), 9.5-year atmospheric lifetime."
+  ),
+  
+  # COAL COMPLETE SUPPLY CHAIN
+  coal_supply_chain = list(
+    # Direct combustion - EPA eGRID 2022
+    co2_per_kwh_combustion = 2.23,   # lbs CO2/kWh (lignite/sub-bituminous average)
+    
+    # Mining, transport, processing - NETL Coal LCA 2019
+    mining_transport_co2_per_kwh = 0.25,  # Surface mining, rail transport
+    processing_co2_per_kwh = 0.08,        # Coal washing, preparation
+    
+    # Coal bed methane - EPA Coal Mine Methane Report 2024
+    coal_bed_methane_co2e_per_kwh = 0.15, # lbs CO2e/kWh (20-year GWP)
+    
+    # Total coal supply chain
+    total_co2e_per_kwh = 2.71,       # 2.23 + 0.25 + 0.08 + 0.15
+    
+    citation = "EPA eGRID 2022 (combustion 2.23 lbs/kWh), NETL Coal LCA 2019 (upstream 0.33 lbs/kWh), EPA Coal Mine Methane 2024 (0.15 lbs CO2e/kWh)."
+  ),
+  
+  # NUCLEAR LIFECYCLE
+  nuclear_supply_chain = list(
+    # Complete lifecycle - NREL Harmonization Study 2021
+    lifecycle_co2_per_kwh = 0.015,   # lbs CO2e/kWh (mining, enrichment, construction, waste)
+    citation = "NREL Life Cycle Assessment Harmonization 2021. Nuclear lifecycle: 0.015 lbs CO2e/kWh."
+  ),
+  
+  # GA POWER DISPATCH PARAMETERS
+  ga_dispatch = list(
+    # Current grid mix - GA Power IRP 2025 filing
+    current_mix = list(coal = 0.35, gas = 0.45, nuclear = 0.20),
+    
+    # Transmission and distribution losses - EIA Form 861
+    transmission_losses = 0.10,  # 10% T&D losses
+    
+    # Grid evolution trajectory - GA Power IRP 2025
+    annual_cleaning_rate = 0.02,  # 2%/year emissions reduction (coal retirement, renewables)
+    
+    # Merit order dispatch shares by time period
+    baseload_shares = list(nuclear = 0.60, coal = 0.40),  # Night: nuclear preferred, lower emissions
+    peak_shares = list(nuclear = 0.15, coal = 0.25, gas_cc = 0.35, gas_ct = 0.25), # Peak: gas peakers
+    
+    citation = "GA Power Integrated Resource Plan 2025 (PSC Docket 44160), EIA Form 861 (T&D losses), NERC dispatch data."
+  )
+)
+
+# Calculate complete gas emissions factors for different methane scenarios
+calculate_complete_gas_emissions <- function(therms, methane_leakage_rate, gwp_timeframe = 20) {
+  
+  # Direct combustion CO2
+  combustion_co2 <- therms * emissions_factors_complete$gas_supply_chain$co2_per_therm_combustion
+  
+  # Upstream CO2 (processing, transport)
+  upstream_co2 <- therms * emissions_factors_complete$gas_supply_chain$upstream_co2_per_therm
+  
+  # Fugitive methane emissions
+  ch4_leaked_lbs <- therms * methane_leakage_rate * emissions_factors_complete$gas_supply_chain$ch4_lbs_per_therm
+  
+  # Convert methane to CO2-equivalent
+  if(gwp_timeframe == 20) {
+    ch4_co2e <- ch4_leaked_lbs * emissions_factors_complete$gas_supply_chain$ch4_gwp_20yr
+  } else {
+    ch4_co2e <- ch4_leaked_lbs * emissions_factors_complete$gas_supply_chain$ch4_gwp_100yr
+  }
+  
+  # Total supply chain emissions
+  total_co2e <- combustion_co2 + upstream_co2 + ch4_co2e
+  
+  return(list(
+    combustion_co2_lbs = combustion_co2,
+    upstream_co2_lbs = upstream_co2,
+    fugitive_ch4_lbs = ch4_leaked_lbs,
+    fugitive_ch4_co2e_lbs = ch4_co2e,
+    total_co2e_lbs = total_co2e,
+    total_co2e_tons = total_co2e / 2000
+  ))
+}
+
+cat("=== COMPLETE SUPPLY CHAIN EMISSIONS FACTORS ===\n")
+
+# Display gas emissions with three methane leakage scenarios
+gas_scenarios <- data.frame(
+  scenario = c("EPA_Conservative", "Atmospheric_Realistic", "Satellite_HighEnd"),
+  leakage_rate = c(0.025, 0.045, 0.065),
+  description = c("EPA estimate (2.5%)", "Atmospheric studies (4.5%)", "Satellite data (6.5%)")
+)
+
+cat("Natural gas complete supply chain (20-year GWP for tipping points analysis):\n")
+for(i in 1:nrow(gas_scenarios)) {
+  gas_result <- calculate_complete_gas_emissions(100, gas_scenarios$leakage_rate[i], 20)
+  cat("  ", gas_scenarios$scenario[i], " (", gas_scenarios$leakage_rate[i]*100, "%): ", 
+      round(gas_result$total_co2e_lbs/100, 1), " lbs CO2e/therm\n", sep="")
+}
+
+# Use realistic atmospheric estimate (4.5%) for main analysis
+realistic_methane_rate <- emissions_factors_complete$gas_supply_chain$methane_leakage_atmospheric
+
+cat("\nGrid electricity supply chain:\n")
+cat("  Coal (complete):", emissions_factors_complete$coal_supply_chain$total_co2e_per_kwh, "lbs CO2e/kWh\n")
+cat("  Nuclear (lifecycle):", emissions_factors_complete$nuclear_supply_chain$lifecycle_co2_per_kwh, "lbs CO2e/kWh\n")
+cat("  Gas CC + upstream methane: ~1.2 lbs CO2e/kWh\n")
+cat("  Gas CT + upstream methane: ~1.6 lbs CO2e/kWh\n")
+```
+
+# 2. GA Power Dispatch Model with Complete Upstream Emissions
+
+```{r dispatch_model_complete}
+# HOURLY GRID EMISSIONS WITH COMPLETE SUPPLY CHAIN
+calculate_hourly_grid_emissions <- function(hour_of_day, year = 2025) {
+  
+  # Grid evolution factor
+  years_from_2025 <- year - 2025
+  cleaning_factor <- (1 - emissions_factors_complete$ga_dispatch$annual_cleaning_rate)^years_from_2025
+  
+  # Merit order dispatch shares by hour
+  if(hour_of_day >= 0 & hour_of_day < 6) {
+    # Night baseload: Nuclear dominant (cleanest period)
+    nuclear_share <- emissions_factors_complete$ga_dispatch$baseload_shares$nuclear  # 60%
+    coal_share <- emissions_factors_complete$ga_dispatch$baseload_shares$coal        # 40%
+    gas_cc_share <- 0
+    gas_ct_share <- 0
+    
+  } else if(hour_of_day >= 6 & hour_of_day < 14) {
+    # Morning/midday: Add combined cycle
+    nuclear_share <- 0.35
+    coal_share <- 0.35
+    gas_cc_share <- 0.30
+    gas_ct_share <- 0
+    
+  } else if(hour_of_day >= 14 & hour_of_day < 19) {
+    # PEAK HOURS: Gas peakers running (highest emissions period)
+    nuclear_share <- emissions_factors_complete$ga_dispatch$peak_shares$nuclear   # 15%
+    coal_share <- emissions_factors_complete$ga_dispatch$peak_shares$coal         # 25%
+    gas_cc_share <- emissions_factors_complete$ga_dispatch$peak_shares$gas_cc     # 35%
+    gas_ct_share <- emissions_factors_complete$ga_dispatch$peak_shares$gas_ct     # 25% - KEY: peakers
+    
+  } else {
+    # Evening: Ramp down from peak
+    nuclear_share <- 0.40
+    coal_share <- 0.35
+    gas_cc_share <- 0.25
+    gas_ct_share <- 0
+  }
+  
+  # Emissions by generation type with complete supply chain
+  nuclear_emissions <- emissions_factors_complete$nuclear_supply_chain$lifecycle_co2_per_kwh
+  coal_emissions <- emissions_factors_complete$coal_supply_chain$total_co2e_per_kwh
+  
+  # Gas with upstream methane (4.5% leakage, 20-year GWP)
+  methane_multiplier <- 1 + (realistic_methane_rate * 
+                             emissions_factors_complete$gas_supply_chain$ch4_gwp_20yr * 0.05)
+  gas_cc_emissions <- 0.91 * methane_multiplier  # Combined cycle + upstream
+  gas_ct_emissions <- 1.22 * methane_multiplier  # Peaker turbines + upstream (dirtiest)
+  
+  # Weighted emissions factor for this hour
+  emissions_factor <- 
+    nuclear_share * nuclear_emissions +
+    coal_share * coal_emissions * cleaning_factor +  # Coal getting more efficient
+    gas_cc_share * gas_cc_emissions +
+    gas_ct_share * gas_ct_emissions
+  
+  # Add transmission and distribution losses
+  return(emissions_factor * (1 + emissions_factors_complete$ga_dispatch$transmission_losses))
+}
+
+# Generate daily emissions profiles
+create_daily_profile <- function(season = "summer", year = 2025) {
+  hours <- 0:23
+  month <- ifelse(season == "summer", 7, 1)
+  
+  emissions <- sapply(hours, function(h) calculate_hourly_grid_emissions(h, year))
+  
+  data.frame(
+    hour = hours,
+    emissions_factor = emissions,
+    season = season,
+    year = year,
+    time_period = case_when(
+      hours >= 14 & hours < 19 ~ "peak",
+      hours >= 6 & hours < 14 ~ "shoulder",
+      TRUE ~ "off_peak"
+    )
+  )
+}
+
+# Create profiles for visualization
+summer_profile <- create_daily_profile("summer", 2025)
+winter_profile <- create_daily_profile("winter", 2025)
+
+# Visualize complete dispatch emissions
+p_dispatch_complete <- ggplot() +
+  geom_line(data = summer_profile, 
+           aes(x = hour, y = emissions_factor, color = "Summer"), size = 1.2) +
+  geom_line(data = winter_profile,
+           aes(x = hour, y = emissions_factor, color = "Winter"), size = 1.2) +
+  geom_hline(yintercept = 0.99, linetype = "dashed", alpha = 0.5) +
+  annotate("text", x = 20, y = 1.0, label = "Grid Average (outdated)", size = 3) +
+  annotate("rect", xmin = 14, xmax = 19, ymin = 0, ymax = Inf, alpha = 0.2, fill = "red") +
+  annotate("text", x = 16.5, y = 0.8, label = "Peak Hours\n(Gas Peakers +\nUpstream Methane)", size = 3) +
+  scale_x_continuous(breaks = seq(0, 23, 3)) +
+  scale_color_manual(values = c("Summer" = "red", "Winter" = "blue")) +
+  labs(title = "GA Power Hourly Emissions with Complete Supply Chain",
+       subtitle = "Peak hours (2-7 PM) include gas peakers with upstream methane emissions",
+       x = "Hour of Day",
+       y = "Emissions Factor (lbs CO2e/kWh)",
+       color = "Season",
+       caption = "Sources: GA Power IRP 2025, EPA eGRID 2022, Alvarez Nature 2024") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_dispatch_complete)
+
+cat("DISPATCH MODEL WITH COMPLETE SUPPLY CHAIN:\n")
+peak_emissions <- max(summer_profile$emissions_factor)
+offpeak_emissions <- min(summer_profile$emissions_factor)
+cat("Peak emissions (2-7 PM with upstream):", round(peak_emissions, 3), "lbs CO2e/kWh\n")
+cat("Off-peak emissions (night baseload):", round(offpeak_emissions, 3), "lbs CO2e/kWh\n")
+cat("Peak/off-peak ratio:", round(peak_emissions/offpeak_emissions, 2), "x\n")
+```
+
+# 3. Battery Load Shifting Analysis with Complete Upstream
+
+```{r battery_analysis_complete}
+# BATTERY CLIMATE VALUE WITH COMPLETE SUPPLY CHAIN
+calculate_battery_complete_value <- function() {
+  
+  # Peak vs off-peak emissions with complete upstream
+  peak_emissions <- calculate_hourly_grid_emissions(16)   # 4 PM (gas peakers + upstream methane)
+  offpeak_emissions <- calculate_hourly_grid_emissions(3) # 3 AM (nuclear dominant baseload)
+  
+  # Battery parameters from house profile
+  battery_capacity <- house_profile$installer_system_full$battery_capacity_kwh
+  round_trip_efficiency <- 0.96
+  
+  # Daily load shifting calculation
+  emissions_differential <- peak_emissions - offpeak_emissions
+  daily_avoided_lbs <- battery_capacity * emissions_differential * round_trip_efficiency
+  annual_avoided_lbs <- daily_avoided_lbs * 365
+  annual_avoided_tons <- annual_avoided_lbs / 2000
+  
+  # Compare to original calculation (without complete upstream)
+  original_peak <- 1.25 * 1.1  # Original peak estimate
+  original_offpeak <- 0.75 * 1.1  # Original baseload estimate
+  original_benefit <- battery_capacity * 365 * (original_peak - original_offpeak) * 0.96 / 2000
+  
+  # Enhancement factor from complete analysis
+  enhancement_factor <- ifelse(original_benefit != 0, annual_avoided_tons / original_benefit, NA)
+  
+  return(list(
+    peak_emissions_lbs_per_kwh = peak_emissions,
+    offpeak_emissions_lbs_per_kwh = offpeak_emissions,
+    emissions_differential = emissions_differential,
+    annual_co2_avoided_tons = annual_avoided_tons,
+    original_benefit_tons = original_benefit,
+    enhancement_factor = enhancement_factor,
+    battery_capacity_kwh = battery_capacity,
+    peak_offpeak_ratio = peak_emissions / offpeak_emissions
+  ))
+}
+
+battery_complete_value <- calculate_battery_complete_value()
+
+# Battery operation visualization
+create_battery_schedule <- function() {
+  hours <- 0:23
+  
+  # Typical consumption pattern
+  consumption <- c(0.5, 0.4, 0.4, 0.4, 0.4, 0.6,   # Night
+                  0.8, 1.0, 0.9, 0.8, 0.7, 0.7,    # Morning  
+                  0.8, 0.9, 1.2, 1.4, 1.5, 1.6,    # Afternoon peak
+                  1.4, 1.2, 1.0, 0.8, 0.6, 0.5)    # Evening
+  
+  # Battery operation strategy
+  battery_action <- c(rep("charge", 6),      # 12-6 AM: Charge from clean baseload
+                     rep("idle", 8),          # 6 AM-2 PM: Save capacity  
+                     rep("discharge", 5),     # 2-7 PM: Offset dirty peak
+                     rep("idle", 5))          # 7 PM-12 AM: Idle
+  
+  # Get emissions factors
+  emissions_factors <- sapply(hours, calculate_hourly_grid_emissions)
+  
+  data.frame(
+    hour = hours,
+    consumption_kw = consumption,
+    battery_action = battery_action,
+    emissions_factor = emissions_factors,
+    battery_kwh = case_when(
+      battery_action == "charge" ~ battery_complete_value$battery_capacity_kwh / 6 * 1.04,     # Charging losses
+      battery_action == "discharge" ~ -battery_complete_value$battery_capacity_kwh / 5 * 0.96, # Efficiency
+      TRUE ~ 0
+    )
+  ) %>%
+    mutate(
+      adjusted_consumption = consumption_kw + battery_kwh,
+      no_battery_emissions = consumption_kw * emissions_factor,
+      with_battery_emissions = adjusted_consumption * emissions_factor
+    )
+}
+
+battery_schedule <- create_battery_schedule()
+
+# Calculate daily benefit
+daily_benefit <- sum(battery_schedule$no_battery_emissions) - sum(battery_schedule$with_battery_emissions)
+
+# Visualize battery operation
+p_battery_operation <- ggplot(battery_schedule, aes(x = hour)) +
+  geom_area(aes(y = consumption_kw, fill = "Base Consumption"), alpha = 0.5) +
+  geom_col(aes(y = battery_kwh/2, fill = battery_action), alpha = 0.7, width = 0.8) +
+  geom_line(aes(y = emissions_factor/2, color = "Grid Emissions"), size = 1) +
+  scale_fill_manual(values = c("Base Consumption" = "gray",
+                              "charge" = "blue", "discharge" = "green", "idle" = "transparent"),
+                    name = "Battery Action") +
+  scale_color_manual(values = c("Grid Emissions" = "red"), name = "") +
+  labs(title = "Battery Load Shifting Strategy with Complete Grid Emissions",
+       subtitle = paste("Avoids", round(battery_complete_value$annual_co2_avoided_tons, 2), 
+                       "tons CO2e/year by charging during clean hours, discharging during dirty peaks"),
+       x = "Hour of Day",
+       y = "Power (kW) / Emissions Factor (scaled)",
+       caption = "Charging during nuclear-dominant baseload, discharging during gas peaker peaks") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_battery_operation)
+
+cat("\n=== BATTERY LOAD SHIFTING WITH COMPLETE UPSTREAM ===\n")
+cat("Peak emissions (4 PM with upstream):", round(battery_complete_value$peak_emissions_lbs_per_kwh, 3), "lbs CO2e/kWh\n")
+cat("Off-peak emissions (3 AM baseload):", round(battery_complete_value$offpeak_emissions_lbs_per_kwh, 3), "lbs CO2e/kWh\n")
+cat("Emissions differential:", round(battery_complete_value$emissions_differential, 3), "lbs CO2e/kWh\n")
+cat("Peak/off-peak ratio:", round(battery_complete_value$peak_offpeak_ratio, 2), "x\n")
+
+if(battery_complete_value$annual_co2_avoided_tons > 0) {
+  cat("Annual CO2e avoided:", round(battery_complete_value$annual_co2_avoided_tons, 2), "tons\n")
+  cat("Daily benefit:", round(daily_benefit, 2), "lbs CO2e\n")
+} else {
+  cat("Annual CO2e penalty:", round(abs(battery_complete_value$annual_co2_avoided_tons), 2), "tons\n")
+  cat("Daily penalty:", round(abs(daily_benefit), 2), "lbs CO2e\n")
+  cat("NOTE: Battery increases emissions by shifting from cleaner peak to dirtier baseload\n")
+}
+
+if(!is.na(battery_complete_value$enhancement_factor)) {
+  cat("Enhancement vs original calculation:", round(battery_complete_value$enhancement_factor, 2), "x\n")
+}
+```
+
+# 4. Radiative Forcing Analysis - CO2 vs Methane Separation
+
+```{r radiative_forcing_analysis}
+# TIME-INTEGRATED RADIATIVE FORCING OVER 50 YEARS
+# Critical for tipping points analysis: separates long-term CO2 vs short-term methane impact
+
+calculate_radiative_forcing <- function(scenario_name, years = 50) {
+  
+  # Get annual emissions by component from house profile
+  baseline_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms +
+                        house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms +
+                        house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+  
+  baseline_electric_kwh <- house_profile$baseline_consumption$annual_kwh_electric
+  
+  # Calculate scenario-specific emissions
+  if(scenario_name == "baseline") {
+    # Complete gas supply chain
+    gas_result <- calculate_complete_gas_emissions(baseline_gas_therms, realistic_methane_rate, 20)
+    annual_co2_fossil_tons <- baseline_electric_kwh * 0.99 / 2000 + 
+                             (gas_result$combustion_co2_lbs + gas_result$upstream_co2_lbs) / 2000
+    annual_ch4_tons <- gas_result$fugitive_ch4_lbs / 2000
+    
+  } else if(scenario_name == "solar_battery") {
+    # Solar reduces grid CO2, battery provides additional benefit, gas unchanged
+    solar_benefit <- house_profile$installer_system_full$annual_production_estimate * 0.99 / 2000
+    battery_benefit <- battery_complete_value$annual_co2_avoided_tons
+    
+    gas_result <- calculate_complete_gas_emissions(baseline_gas_therms, realistic_methane_rate, 20)
+    annual_co2_fossil_tons <- (baseline_electric_kwh * 0.99 / 2000 - solar_benefit - battery_benefit) +
+                             (gas_result$combustion_co2_lbs + gas_result$upstream_co2_lbs) / 2000
+    annual_ch4_tons <- gas_result$fugitive_ch4_lbs / 2000  # Gas unchanged
+    
+  } else if(scenario_name == "heat_pump_water_heater") {
+    # Eliminate water heater gas (175 therms), add heat pump electric load
+    remaining_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms +
+                           house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+    
+    hpwh_electric_kwh <- house_profile$heat_pump_loads$water_heater_additional_kwh
+    
+    gas_result <- calculate_complete_gas_emissions(remaining_gas_therms, realistic_methane_rate, 20)
+    annual_co2_fossil_tons <- (baseline_electric_kwh + hpwh_electric_kwh) * 0.99 / 2000 +
+                             (gas_result$combustion_co2_lbs + gas_result$upstream_co2_lbs) / 2000
+    annual_ch4_tons <- gas_result$fugitive_ch4_lbs / 2000
+    
+  } else if(scenario_name == "full_electrification") {
+    # Eliminate all gas except stove, add both heat pump loads, include solar+battery
+    remaining_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms
+    
+    # Electric loads
+    solar_benefit <- house_profile$installer_system_full$annual_production_estimate * 0.99 / 2000
+    battery_benefit <- battery_complete_value$annual_co2_avoided_tons
+    hpwh_electric_kwh <- house_profile$heat_pump_loads$water_heater_additional_kwh
+    hp_hvac_electric_kwh <- house_profile$heat_pump_loads$space_heating_additional_kwh
+    
+    total_electric_kwh <- baseline_electric_kwh + hpwh_electric_kwh + hp_hvac_electric_kwh
+    net_electric_emissions <- (total_electric_kwh * 0.99 / 2000) - solar_benefit - battery_benefit
+    
+    gas_result <- calculate_complete_gas_emissions(remaining_gas_therms, realistic_methane_rate, 20)
+    annual_co2_fossil_tons <- net_electric_emissions +
+                             (gas_result$combustion_co2_lbs + gas_result$upstream_co2_lbs) / 2000
+    annual_ch4_tons <- gas_result$fugitive_ch4_lbs / 2000
+  }
+  
+  # Initialize results dataframe
+  results <- data.frame(
+    year = 0:years,
+    co2_atmospheric = 0,
+    ch4_atmospheric = 0,
+    co2_forcing = 0,
+    ch4_forcing_20yr = 0,
+    ch4_forcing_100yr = 0,
+    total_forcing_20yr = 0,
+    total_forcing_100yr = 0,
+    cumulative_forcing_20yr = 0,
+    cumulative_forcing_100yr = 0
+  )
+  
+  # Radiative forcing constants based on IPCC AR6
+  ch4_lifetime <- emissions_factors_complete$gas_supply_chain$ch4_atmospheric_lifetime  # 9.5 years
+  co2_airborne_fraction <- 0.45  # Fraction remaining in atmosphere after centuries
+  
+  # Track atmospheric concentrations and forcing over time
+  for(i in 1:nrow(results)) {
+    year <- results$year[i]
+    
+    # CO2 accumulates in atmosphere (centuries lifetime)
+    if(i == 1) {
+      results$co2_atmospheric[i] <- annual_co2_fossil_tons * co2_airborne_fraction
+    } else {
+      # CO2 decays very slowly (~1% per year approximation)
+      results$co2_atmospheric[i] <- results$co2_atmospheric[i-1] * 0.99 + 
+                                   annual_co2_fossil_tons * co2_airborne_fraction
+    }
+    
+    # CH4 decays exponentially (9.5 year e-folding time)
+    if(i == 1) {
+      results$ch4_atmospheric[i] <- annual_ch4_tons
+    } else {
+      # Exponential decay: C(t) = C(0) * exp(-t/τ)
+      decay_factor <- exp(-1/ch4_lifetime)
+      results$ch4_atmospheric[i] <- results$ch4_atmospheric[i-1] * decay_factor + annual_ch4_tons
+    }
+    
+    # Convert atmospheric concentrations to radiative forcing (relative units)
+    # CO2 has linear relationship, methane has logarithmic but approximated as linear for comparison
+    results$co2_forcing[i] <- results$co2_atmospheric[i] * 0.02      # CO2 forcing coefficient  
+    results$ch4_forcing_20yr[i] <- results$ch4_atmospheric[i] * 0.84  # CH4 much more potent (20-yr GWP)
+    results$ch4_forcing_100yr[i] <- results$ch4_atmospheric[i] * 0.28 # CH4 traditional (100-yr GWP)
+    
+    # Total forcing for each timeframe
+    results$total_forcing_20yr[i] <- results$co2_forcing[i] + results$ch4_forcing_20yr[i]
+    results$total_forcing_100yr[i] <- results$co2_forcing[i] + results$ch4_forcing_100yr[i]
+  }
+  
+  # Cumulative forcing (area under curve) - this drives actual temperature change
+  results$cumulative_forcing_20yr <- cumsum(results$total_forcing_20yr)
+  results$cumulative_forcing_100yr <- cumsum(results$total_forcing_100yr)
+  
+  results$scenario <- scenario_name
+  return(results)
+}
+
+# Calculate radiative forcing for all key scenarios
+rf_baseline <- calculate_radiative_forcing("baseline")
+rf_solar_battery <- calculate_radiative_forcing("solar_battery")
+rf_hpwh <- calculate_radiative_forcing("heat_pump_water_heater") 
+rf_full_electric <- calculate_radiative_forcing("full_electrification")
+
+rf_combined <- bind_rows(rf_baseline, rf_solar_battery, rf_hpwh, rf_full_electric)
+
+# Create comprehensive radiative forcing visualization
+p_forcing_annual <- ggplot(rf_combined, aes(x = year, y = total_forcing_20yr, color = scenario)) +
+  geom_line(size = 1.2) +
+  scale_color_viridis_d(labels = c("Baseline", "Full Electric", "Heat Pump WH", "Solar+Battery")) +
+  labs(title = "A. Annual Radiative Forcing (20-year GWP)",
+       subtitle = "Instantaneous climate warming potential (methane 84x CO2 over 20 years)",
+       x = "Year", y = "Annual Forcing (relative units)") +
+  theme_minimal() + 
+  theme(legend.position = "bottom")
+
+p_forcing_cumulative <- ggplot(rf_combined, aes(x = year, y = cumulative_forcing_20yr, color = scenario)) +
+  geom_line(size = 1.2) +
+  scale_color_viridis_d(labels = c("Baseline", "Full Electric", "Heat Pump WH", "Solar+Battery")) +
+  annotate("rect", xmin = 0, xmax = 20, ymin = -Inf, ymax = Inf, alpha = 0.1, fill = "red") +
+  annotate("text", x = 10, y = max(rf_baseline$cumulative_forcing_20yr) * 0.9,
+           label = "Critical 20-year period\n(tipping points window)", size = 3, color = "darkred") +
+  labs(title = "B. Cumulative Radiative Forcing (20-year GWP)",  
+       subtitle = "Time-integrated warming drives actual temperature change",
+       x = "Year", y = "Cumulative Forcing (relative units)",
+       caption = "Methane decays rapidly (~10 years) vs CO2 (centuries)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# CO2 vs Methane separation by scenario
+ghg_separation <- rf_combined %>%
+  select(year, scenario, co2_forcing, ch4_forcing_20yr) %>%
+  pivot_longer(cols = c(co2_forcing, ch4_forcing_20yr), names_to = "gas_type", values_to = "forcing")
+
+p_ghg_separation <- ggplot(ghg_separation, aes(x = year, y = forcing, fill = gas_type)) +
+  geom_area(position = "stack") +
+  facet_wrap(~scenario, labeller = labeller(scenario = c("baseline" = "Baseline",
+                                                        "solar_battery" = "Solar+Battery", 
+                                                        "heat_pump_water_heater" = "Heat Pump WH",
+                                                        "full_electrification" = "Full Electric"))) +
+  scale_fill_manual(values = c("co2_forcing" = "darkblue", "ch4_forcing_20yr" = "red"),
+                    labels = c("CO2 (centuries)", "Methane (9.5 years)")) +
+  labs(title = "C. CO2 vs Methane Forcing Components", 
+       subtitle = "Methane dominates near-term warming but decays rapidly",
+       x = "Year", y = "Forcing Contribution", fill = "Greenhouse Gas") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Combine all forcing visualizations
+p_forcing_complete <- p_forcing_annual / p_forcing_cumulative / p_ghg_separation
+print(p_forcing_complete)
+
+cat("\n=== RADIATIVE FORCING ANALYSIS ===\n")
+cat("Methane atmospheric lifetime:", emissions_factors_complete$gas_supply_chain$ch4_atmospheric_lifetime, "years\n")
+cat("Methane 20-year GWP:", emissions_factors_complete$gas_supply_chain$ch4_gwp_20yr, "x CO2\n")
+cat("Methane 100-year GWP:", emissions_factors_complete$gas_supply_chain$ch4_gwp_100yr, "x CO2\n\n")
+
+# Key forcing metrics at critical timepoints
+forcing_10yr <- rf_combined %>% filter(year == 10) %>%
+  select(scenario, cumulative_forcing_20yr) %>%
+  arrange(desc(cumulative_forcing_20yr))
+
+forcing_20yr <- rf_combined %>% filter(year == 20) %>%
+  select(scenario, cumulative_forcing_20yr) %>%
+  arrange(desc(cumulative_forcing_20yr))
+
+cat("Cumulative forcing at 10 years (early tipping points):\n")
+for(i in 1:nrow(forcing_10yr)) {
+  cat("  ", i, ". ", forcing_10yr$scenario[i], ": ", round(forcing_10yr$cumulative_forcing_20yr[i], 1), " forcing-years\n", sep="")
+}
+
+cat("\nCumulative forcing at 20 years (tipping points window):\n")
+for(i in 1:nrow(forcing_20yr)) {
+  cat("  ", i, ". ", forcing_20yr$scenario[i], ": ", round(forcing_20yr$cumulative_forcing_20yr[i], 1), " forcing-years\n", sep="")
+}
+```
+
+# 5. Complete Scenario Analysis with Manufacturing LCA
+
+```{r complete_scenario_analysis}
+# CALCULATE COMPLETE LIFECYCLE EMISSIONS FOR ALL SCENARIOS
+calculate_complete_scenario <- function(scenario_name, years = 25) {
+  
+  results <- data.frame(year = 0:years)
+  
+  # Manufacturing emissions (year 0 only) - corrected LCA with electrical service
+  manufacturing_lca <- list(
+    baseline = 0,
+    solar_battery = (house_profile$installer_system_full$system_size_dc * (490 + 53 + 50) + # panels + inverters + racking
+                    house_profile$installer_system_full$battery_capacity_kwh * 104 +           # battery
+                    195) * 2.204 / 2000,  # electrical service (no concrete pad) + kg to tons
+    heat_pump_water_heater = 103 * 2.204 / 2000,  # HPWH manufacturing
+    heat_pump_hvac = 265 * 2.204 / 2000,          # HP HVAC manufacturing  
+    solar_battery_hpwh = (house_profile$installer_system_full$system_size_dc * (490 + 53 + 50) +
+                         house_profile$installer_system_full$battery_capacity_kwh * 104 +
+                         195 + 103) * 2.204 / 2000,
+    full_electrification = (house_profile$installer_system_full$system_size_dc * (490 + 53 + 50) +
+                           house_profile$installer_system_full$battery_capacity_kwh * 104 +
+                           195 + 103 + 265) * 2.204 / 2000
+  )
+  
+  # Net costs after tax credits
+  costs <- list(
+    baseline = 0,
+    solar_battery = house_profile$installer_system_full$net_cost_complete_solar_project,
+    heat_pump_water_heater = 4500,
+    heat_pump_hvac = 15000,
+    solar_battery_hpwh = house_profile$installer_system_full$net_cost_complete_solar_project + 4500,
+    full_electrification = house_profile$installer_system_full$net_cost_complete_solar_project + 19500
+  )
+  
+  for(i in 1:nrow(results)) {
+    year <- results$year[i]
+    
+    # Base consumption from house profile
+    baseline_electric_kwh <- house_profile$baseline_consumption$annual_kwh_electric
+    baseline_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms +
+                          house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms +
+                          house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+    
+    # Calculate complete gas emissions (20-year GWP for tipping points)
+    gas_result <- calculate_complete_gas_emissions(baseline_gas_therms, realistic_methane_rate, 20)
+    base_gas_tons <- gas_result$total_co2e_tons
+    
+    # Grid emissions with time evolution (getting cleaner)
+    grid_cleaning_factor <- (1 - 0.02)^year  # 2%/year improvement
+    grid_emissions_factor <- 0.99 * grid_cleaning_factor / 2000  # tons CO2e/kWh
+    base_electric_tons <- baseline_electric_kwh * grid_emissions_factor
+    
+    # Apply scenario-specific modifications
+    if(scenario_name == "baseline") {
+      electric_tons <- base_electric_tons
+      gas_tons <- base_gas_tons
+      manufacturing_tons <- 0
+      
+    } else if(scenario_name == "solar_battery") {
+      # Manufacturing (year 0 only)
+      manufacturing_tons <- ifelse(year == 0, manufacturing_lca$solar_battery, 0)
+      
+      # Solar production with degradation
+      degradation_factor <- (1 - 0.0025)^year  # 0.25%/year panel degradation
+      solar_production_kwh <- house_profile$installer_system_full$annual_production_estimate * degradation_factor
+      
+      # Battery benefit with capacity degradation
+      battery_degradation <- ifelse(year <= 15, 1, 0.8)  # 80% capacity after 15 years
+      battery_benefit_tons <- battery_complete_value$annual_co2_avoided_tons * battery_degradation
+      
+      # Net electric consumption and unchanged gas
+      net_electric_kwh <- baseline_electric_kwh - solar_production_kwh
+      electric_tons <- max(0, net_electric_kwh * grid_emissions_factor) - battery_benefit_tons
+      gas_tons <- base_gas_tons  # CRITICAL: Gas emissions remain unchanged
+      
+    } else if(scenario_name == "heat_pump_water_heater") {
+      manufacturing_tons <- ifelse(year == 0, manufacturing_lca$heat_pump_water_heater, 0)
+      
+      # Remove water heater gas
+      remaining_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms +
+                             house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+      gas_result_remaining <- calculate_complete_gas_emissions(remaining_gas_therms, realistic_methane_rate, 20)
+      gas_tons <- gas_result_remaining$total_co2e_tons
+      
+      # Add heat pump electric load with efficiency degradation
+      cop_degradation <- (1 - 0.01)^year  # 1%/year efficiency decline
+      effective_cop <- 3.5 * cop_degradation
+      hpwh_electric_kwh <- (house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms * 29.3) / effective_cop
+      
+      electric_tons <- (baseline_electric_kwh + hpwh_electric_kwh) * grid_emissions_factor
+      
+    } else if(scenario_name == "full_electrification") {
+      manufacturing_tons <- ifelse(year == 0, manufacturing_lca$full_electrification, 0)
+      
+      # Solar + battery + both heat pumps
+      degradation_factor <- (1 - 0.0025)^year
+      solar_production_kwh <- house_profile$installer_system_full$annual_production_estimate * degradation_factor
+      
+      battery_degradation <- ifelse(year <= 15, 1, 0.8)
+      battery_benefit_tons <- battery_complete_value$annual_co2_avoided_tons * battery_degradation
+      
+      # Heat pump electric loads
+      cop_degradation <- (1 - 0.01)^year
+      hpwh_electric_kwh <- (house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms * 29.3) / (3.5 * cop_degradation)
+      hp_hvac_electric_kwh <- (house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms * 29.3) / (2.5 * cop_degradation)
+      
+      # Net electric load
+      total_electric_kwh <- baseline_electric_kwh + hpwh_electric_kwh + hp_hvac_electric_kwh
+      net_electric_kwh <- total_electric_kwh - solar_production_kwh
+      electric_tons <- max(0, net_electric_kwh * grid_emissions_factor) - battery_benefit_tons
+      
+      # Keep only stove gas
+      stove_gas_result <- calculate_complete_gas_emissions(house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms, realistic_methane_rate, 20)
+      gas_tons <- stove_gas_result$total_co2e_tons
+    }
+    
+    # Store results
+    results$electric_tons[i] <- electric_tons
+    results$gas_tons[i] <- gas_tons
+    results$manufacturing_tons[i] <- manufacturing_tons
+    results$total_tons[i] <- electric_tons + gas_tons + manufacturing_tons
+  }
+  
+  results$scenario <- scenario_name
+  results$upfront_cost <- costs[[scenario_name]]
+  return(results)
+}
+
+# Calculate all scenarios with complete analysis
+scenarios <- c("baseline", "solar_battery", "heat_pump_water_heater", "full_electrification")
+complete_results <- map_dfr(scenarios, calculate_complete_scenario)
+
+# Visualize scenarios over time
+p_scenarios <- ggplot(complete_results, aes(x = year, y = total_tons, color = scenario)) +
+  geom_line(size = 1.2) +
+  geom_point(data = filter(complete_results, year == 0, manufacturing_tons > 0),
+            aes(y = manufacturing_tons), size = 3, shape = 17, alpha = 0.8) +
+  scale_color_viridis_d(labels = c("Baseline", "Full Electric", "Heat Pump WH", "Solar+Battery")) +
+  geom_hline(yintercept = 0, linetype = "dotted", alpha = 0.5) +
+  labs(title = "Annual Emissions by Scenario (Complete Supply Chain)",
+       subtitle = "Triangles show manufacturing emissions (year 0 only)",
+       x = "Year", 
+       y = "Annual CO2e Emissions (tons)",
+       color = "Scenario",
+       caption = "Includes complete supply chain: upstream methane, coal mining, manufacturing LCA") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_scenarios)
+
+cat("\n=== SCENARIO ANALYSIS SUMMARY ===\n")
+cat("Complete supply chain emissions including:\n")
+cat("- Natural gas: combustion + upstream + fugitive methane (4.5% leakage, 20-year GWP)\n")
+cat("- Grid electricity: dispatch model with complete upstream emissions\n")
+cat("- Manufacturing: cradle-to-grave LCA including electrical service upgrade\n")
+cat("- Equipment degradation: solar panels, battery capacity, heat pump efficiency\n\n")
+
+year_10_results <- complete_results %>% filter(year == 10)
+for(scenario in scenarios) {
+  if(scenario != "baseline") {
+    row <- filter(year_10_results, scenario == !!scenario)
+    cat(str_to_title(str_replace_all(scenario, "_", " ")), " (Year 10):\n", sep="")
+    cat("  Electric: ", round(row$electric_tons, 2), " tons CO2e/year\n", sep="")
+    cat("  Gas: ", round(row$gas_tons, 2), " tons CO2e/year\n", sep="")
+    cat("  Total: ", round(row$total_tons, 2), " tons CO2e/year\n", sep="")
+    cat("  Upfront cost: $", format(row$upfront_cost, big.mark=","), "\n\n", sep="")
+  }
+}
+```
+
+# 6. Dual Cost-Effectiveness Analysis - Standard vs Tipping Points
+
+```{r dual_cost_effectiveness}
+# DUAL COST-EFFECTIVENESS METRICS
+# 1. Standard: $/ton CO2e avoided (traditional economic perspective)
+# 2. Radiative forcing: $/forcing unit avoided (tipping points perspective)
+
+calculate_dual_effectiveness <- function() {
+  
+  # 10-year analysis for cost-effectiveness
+  effectiveness_10yr <- complete_results %>%
+    filter(year == 10) %>%
+    mutate(
+      baseline_emissions = filter(complete_results, scenario == "baseline", year == 10)$total_tons,
+      annual_avoided_tons = baseline_emissions - total_tons,
+      total_avoided_10yr = annual_avoided_tons * 10
+    ) %>%
+    filter(scenario != "baseline") %>%
+    mutate(
+      # Standard cost-effectiveness ($/ton CO2e)
+      cost_per_ton_standard = ifelse(total_avoided_10yr > 0, upfront_cost / total_avoided_10yr, Inf)
+    )
+  
+  # Radiative forcing cost-effectiveness (20-year critical window)
+  rf_20yr <- rf_combined %>% 
+    filter(year == 20) %>%
+    select(scenario, cumulative_forcing_20yr)
+  
+  effectiveness_rf <- effectiveness_10yr %>%
+    left_join(rf_20yr, by = "scenario") %>%
+    mutate(
+      baseline_forcing_20yr = filter(rf_20yr, scenario == "baseline")$cumulative_forcing_20yr,
+      forcing_avoided = baseline_forcing_20yr - cumulative_forcing_20yr,
+      cost_per_forcing_unit = ifelse(forcing_avoided > 0, upfront_cost / forcing_avoided, Inf)
+    )
+  
+  return(effectiveness_rf)
+}
+
+dual_effectiveness <- calculate_dual_effectiveness()
+
+# Create dual ranking tables
+standard_ranking <- dual_effectiveness %>%
+  arrange(cost_per_ton_standard) %>%
+  mutate(
+    rank_standard = row_number(),
+    scenario_name = case_when(
+      scenario == "heat_pump_water_heater" ~ "Heat Pump Water Heater",
+      scenario == "solar_battery" ~ "Solar + Battery",
+      scenario == "full_electrification" ~ "Full Electrification",
+      TRUE ~ str_to_title(str_replace_all(scenario, "_", " "))
+    )
+  ) %>%
+  select(rank_standard, scenario_name, upfront_cost, total_avoided_10yr, cost_per_ton_standard)
+
+forcing_ranking <- dual_effectiveness %>%
+  arrange(cost_per_forcing_unit) %>%
+  mutate(
+    rank_forcing = row_number(),
+    scenario_name = case_when(
+      scenario == "heat_pump_water_heater" ~ "Heat Pump Water Heater",
+      scenario == "solar_battery" ~ "Solar + Battery", 
+      scenario == "full_electrification" ~ "Full Electrification",
+      TRUE ~ str_to_title(str_replace_all(scenario, "_", " "))
+    )
+  ) %>%
+  select(rank_forcing, scenario_name, upfront_cost, forcing_avoided, cost_per_forcing_unit)
+
+# Display results objectively
+cat("=== DUAL COST-EFFECTIVENESS ANALYSIS ===\n")
+cat("Two perspectives for tipping points consideration:\n\n")
+
+cat("STANDARD COST-EFFECTIVENESS ($/ton CO2e avoided, 10-year):\n")
+for(i in 1:nrow(standard_ranking)) {
+  row <- standard_ranking[i, ]
+  cost_formatted <- ifelse(is.finite(row$cost_per_ton_standard), 
+                          paste0("$", round(row$cost_per_ton_standard, 0)), 
+                          "N/A")
+  cat("  ", i, ". ", row$scenario_name, ": ", cost_formatted, "/ton\n", sep="")
+  cat("     Cost: $", format(row$upfront_cost, big.mark=","), 
+      ", CO2e avoided: ", round(row$total_avoided_10yr, 1), " tons\n", sep="")
+}
+
+cat("\nRADIATIVE FORCING COST-EFFECTIVENESS (tipping points perspective, 20-year window):\n")
+for(i in 1:nrow(forcing_ranking)) {
+  row <- forcing_ranking[i, ]
+  cost_formatted <- ifelse(is.finite(row$cost_per_forcing_unit), 
+                          paste0("$", round(row$cost_per_forcing_unit, 0)), 
+                          "N/A")
+  cat("  ", i, ". ", row$scenario_name, ": ", cost_formatted, "/forcing unit\n", sep="")
+  cat("     Cost: $", format(row$upfront_cost, big.mark=","), 
+      ", 20-yr forcing avoided: ", round(row$forcing_avoided, 1), " units\n", sep="")
+}
+
+# Create comparison visualization
+comparison_data <- dual_effectiveness %>%
+  mutate(
+    scenario_label = case_when(
+      scenario == "heat_pump_water_heater" ~ "Heat Pump WH",
+      scenario == "solar_battery" ~ "Solar+Battery",
+      scenario == "full_electrification" ~ "Full Electric",
+      TRUE ~ str_replace_all(scenario, "_", " ")
+    )
+  )
+
+p_dual_comparison <- ggplot(comparison_data, aes(x = cost_per_ton_standard, y = cost_per_forcing_unit)) +
+  geom_point(aes(size = upfront_cost, color = scenario_label), alpha = 0.7) +
+  geom_text_repel(aes(label = scenario_label), size = 3, nudge_y = 0.1) +
+  scale_size_continuous(name = "Upfront Cost ($)", range = c(3, 10), 
+                       labels = function(x) paste0("$", format(x/1000, digits=1), "K")) +
+  scale_color_viridis_d(name = "Scenario") +
+  scale_x_log10(labels = function(x) paste0("$", x)) +
+  scale_y_log10(labels = function(x) paste0("$", x)) +
+  labs(title = "Dual Cost-Effectiveness: Standard vs Tipping Points Perspective",
+       subtitle = "Lower values = more cost-effective",
+       x = "Cost per Ton CO2e Avoided ($/ton) - Standard Metric",
+       y = "Cost per Forcing Unit Avoided ($/unit) - Tipping Points Metric",
+       caption = "Point size = upfront cost. Lower-left = best on both metrics.") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+print(p_dual_comparison)
+
+# Calculate ranking differences
+ranking_comparison <- standard_ranking %>%
+  select(scenario_name, rank_standard) %>%
+  left_join(forcing_ranking %>% select(scenario_name, rank_forcing), by = "scenario_name") %>%
+  mutate(rank_difference = rank_forcing - rank_standard)
+
+cat("\n=== RANKING COMPARISON ===\n")
+cat("How tipping points perspective changes cost-effectiveness ranking:\n")
+for(i in 1:nrow(ranking_comparison)) {
+  row <- ranking_comparison[i, ]
+  if(row$rank_difference == 0) {
+    cat("  ", row$scenario_name, ": Same ranking (", row$rank_standard, ")\n", sep="")
+  } else if(row$rank_difference > 0) {
+    cat("  ", row$scenario_name, ": Drops ", abs(row$rank_difference), " position(s) in tipping points metric\n", sep="")
+  } else {
+    cat("  ", row$scenario_name, ": Improves ", abs(row$rank_difference), " position(s) in tipping points metric\n", sep="")
+  }
+}
+```
+
+# 7. Methane vs CO2 Impact Analysis
+
+```{r methane_analysis}
+# DETAILED METHANE vs CO2 ANALYSIS FOR TIPPING POINTS CONSIDERATION
+
+cat("=== METHANE vs CO2 IMPACT ANALYSIS ===\n")
+cat("Critical for tipping points: methane provides 84x warming over 20 years but decays rapidly\n\n")
+
+# Calculate gas supply chain breakdown with three leakage scenarios
+gas_impact_scenarios <- data.frame(
+  scenario = c("EPA_Conservative", "Atmospheric_Realistic", "Satellite_High"),
+  leakage_rate = c(0.025, 0.045, 0.065),
+  source = c("EPA Natural Gas STAR", "Alvarez Nature 2024", "Chen Nature 2022")
+)
+
+cat("NATURAL GAS SUPPLY CHAIN IMPACT (per 100 therms):\n")
+for(i in 1:nrow(gas_impact_scenarios)) {
+  # 20-year GWP (tipping points metric)
+  gas_20yr <- calculate_complete_gas_emissions(100, gas_impact_scenarios$leakage_rate[i], 20)
+  
+  # 100-year GWP (traditional metric)  
+  gas_100yr <- calculate_complete_gas_emissions(100, gas_impact_scenarios$leakage_rate[i], 100)
+  
+  methane_share_20yr <- gas_20yr$fugitive_ch4_co2e_lbs / gas_20yr$total_co2e_lbs * 100
+  methane_share_100yr <- gas_100yr$fugitive_ch4_co2e_lbs / gas_100yr$total_co2e_lbs * 100
+  
+  cat("\n", gas_impact_scenarios$scenario[i], " (", gas_impact_scenarios$leakage_rate[i]*100, "% leakage):\n", sep="")
+  cat("  Source: ", gas_impact_scenarios$source[i], "\n", sep="")
+  cat("  20-year impact: ", round(gas_20yr$total_co2e_tons, 1), " tons CO2e (methane: ", round(methane_share_20yr, 0), "%)\n", sep="")
+  cat("  100-year impact: ", round(gas_100yr$total_co2e_tons, 1), " tons CO2e (methane: ", round(methane_share_100yr, 0), "%)\n", sep="")
+  cat("  Breakdown:\n")
+  cat("    Direct combustion: ", round(gas_20yr$combustion_co2_lbs/2000, 1), " tons CO2\n", sep="")
+  cat("    Upstream CO2: ", round(gas_20yr$upstream_co2_lbs/2000, 1), " tons CO2\n", sep="")
+  cat("    Fugitive methane: ", round(gas_20yr$fugitive_ch4_lbs/2000, 3), " tons CH4 → ", 
+      round(gas_20yr$fugitive_ch4_co2e_lbs/2000, 1), " tons CO2e (20-yr)\n", sep="")
+}
+
+# Use realistic scenario for house-specific analysis
+house_gas_therms <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms +
+                   house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms +
+                   house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+
+realistic_gas_impact <- calculate_complete_gas_emissions(house_gas_therms, realistic_methane_rate, 20)
+
+cat("\n=== YOUR HOUSE GAS IMPACT (", house_gas_therms, " therms/year) ===\n", sep="")
+cat("Using realistic 4.5% leakage rate (atmospheric studies):\n")
+cat("  Annual CO2e impact: ", round(realistic_gas_impact$total_co2e_tons, 1), " tons (20-year GWP)\n", sep="")
+cat("  Methane component: ", round(realistic_gas_impact$fugitive_ch4_co2e_lbs/2000, 1), " tons CO2e (", 
+    round(realistic_gas_impact$fugitive_ch4_co2e_lbs/realistic_gas_impact$total_co2e_lbs*100, 0), "%)\n", sep="")
+cat("  CO2 component: ", round((realistic_gas_impact$combustion_co2_lbs + realistic_gas_impact$upstream_co2_lbs)/2000, 1), 
+    " tons CO2 (", round((realistic_gas_impact$combustion_co2_lbs + realistic_gas_impact$upstream_co2_lbs)/realistic_gas_impact$total_co2e_lbs*100, 0), "%)\n", sep="")
+
+cat("\nGas appliance breakdown:\n")
+for(appliance in c("stove", "water_heater", "hvac")) {
+  therms <- house_profile$baseline_consumption$gas_appliance_breakdown[[paste0(appliance, "_therms")]]
+  appliance_impact <- calculate_complete_gas_emissions(therms, realistic_methane_rate, 20)
+  cat("  ", str_to_title(str_replace(appliance, "_", " ")), " (", therms, " therms): ", 
+      round(appliance_impact$total_co2e_tons, 1), " tons CO2e/year\n", sep="")
+}
+
+# Methane decay analysis
+cat("\n=== METHANE ATMOSPHERIC BEHAVIOR ===\n")
+cat("Methane lifetime: ", emissions_factors_complete$gas_supply_chain$ch4_atmospheric_lifetime, " years (vs CO2: centuries)\n", sep="")
+cat("Decay rate: ", round((1-exp(-1/9.5))*100, 1), "% per year\n", sep="")
+cat("50% remaining after: ", round(9.5*log(2), 1), " years\n", sep="")
+cat("90% gone after: ", round(9.5*log(10), 1), " years\n", sep="")
+
+# Create methane decay visualization
+years_decay <- 0:30
+ch4_remaining <- exp(-years_decay/9.5)
+co2_remaining <- rep(0.99, length(years_decay))^years_decay  # Very slow decay
+
+decay_data <- data.frame(
+  year = rep(years_decay, 2),
+  fraction_remaining = c(ch4_remaining, co2_remaining),
+  gas_type = rep(c("Methane", "CO2"), each = length(years_decay))
+)
+
+p_decay <- ggplot(decay_data, aes(x = year, y = fraction_remaining, color = gas_type)) +
+  geom_line(size = 1.5) +
+  scale_color_manual(values = c("Methane" = "red", "CO2" = "darkblue")) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(title = "Atmospheric Decay: Methane vs CO2",
+       subtitle = "Methane decays rapidly (9.5-year lifetime) vs CO2 (centuries)",
+       x = "Years After Emission", 
+       y = "Fraction Remaining in Atmosphere",
+       color = "Greenhouse Gas",
+       caption = "Methane provides intense near-term warming but disappears quickly") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_decay)
+
+cat("\n=== TIPPING POINTS IMPLICATIONS ===\n")
+cat("Near-term methane reduction may be critical if climate tipping points are imminent:\n")
+cat("- Methane: 84x CO2 warming over 20 years, then rapid decay\n")
+cat("- CO2: Lower immediate impact but accumulates for centuries\n")
+cat("- Heat pumps eliminate methane immediately (complete gas supply chain)\n")
+cat("- Solar+battery reduces long-term CO2 but leaves methane unchanged\n")
+cat("- Optimal strategy depends on tipping points timeline urgency\n")
+```
+
+# 8. Data Summary for Decision Making
+
+```{r data_summary}
+# OBJECTIVE DATA PRESENTATION - NO PREDETERMINED CONCLUSIONS
+
+cat("=== COMPLETE EMISSIONS ANALYSIS DATA SUMMARY ===\n")
+cat("Objective findings for December 31, 2025 tax credit decision\n\n")
+
+# Battery analysis result
+cat("BATTERY LOAD SHIFTING ANALYSIS:\n")
+cat("Peak emissions (4 PM with upstream):", round(battery_complete_value$peak_emissions_lbs_per_kwh, 3), "lbs CO2e/kWh\n")
+cat("Off-peak emissions (3 AM baseload):", round(battery_complete_value$offpeak_emissions_lbs_per_kwh, 3), "lbs CO2e/kWh\n")
+
+if(battery_complete_value$annual_co2_avoided_tons > 0) {
+  cat("Battery climate benefit:", round(battery_complete_value$annual_co2_avoided_tons, 2), "tons CO2e/year\n")
+} else {
+  cat("Battery climate penalty:", round(abs(battery_complete_value$annual_co2_avoided_tons), 2), "tons CO2e/year\n")
+}
+
+# Cost-effectiveness rankings
+solar_battery_standard_rank <- which(standard_ranking$scenario_name == "Solar + Battery")
+solar_battery_forcing_rank <- which(forcing_ranking$scenario_name == "Solar + Battery")
+
+cat("\nCOST-EFFECTIVENESS RANKINGS:\n")
+cat("Standard metric ($/ton CO2e):\n")
+cat("  Solar+Battery: #", solar_battery_standard_rank, " of ", nrow(standard_ranking), " ($", 
+    round(standard_ranking$cost_per_ton_standard[solar_battery_standard_rank], 0), "/ton)\n", sep="")
+cat("  Most cost-effective: ", standard_ranking$scenario_name[1], " ($", 
+    round(standard_ranking$cost_per_ton_standard[1], 0), "/ton)\n", sep="")
+
+cat("\nTipping points metric ($/forcing unit):\n") 
+cat("  Solar+Battery: #", solar_battery_forcing_rank, " of ", nrow(forcing_ranking), " ($", 
+    round(forcing_ranking$cost_per_forcing_unit[solar_battery_forcing_rank], 0), "/unit)\n", sep="")
+cat("  Most cost-effective: ", forcing_ranking$scenario_name[1], " ($", 
+    round(forcing_ranking$cost_per_forcing_unit[1], 0), "/unit)\n", sep="")
+
+# Methane impact
+cat("\nMETHANE IMPACT (your house):\n")
+cat("Natural gas supply chain:", round(realistic_gas_impact$total_co2e_tons, 1), "tons CO2e/year (4.5% leakage)\n")
+cat("Methane component:", round(realistic_gas_impact$fugitive_ch4_co2e_lbs/realistic_gas_impact$total_co2e_lbs*100, 0), "% of total impact\n")
+cat("Methane atmospheric lifetime:", emissions_factors_complete$gas_supply_chain$ch4_atmospheric_lifetime, "years (decays rapidly)\n")
+
+# Scenario emissions at year 10
+year_10_comparison <- complete_results %>% 
+  filter(year == 10) %>%
+  arrange(total_tons)
+
+cat("\nSCENARIO EMISSIONS COMPARISON (Year 10):\n")
+for(i in 1:nrow(year_10_comparison)) {
+  row <- year_10_comparison[i, ]
+  scenario_label <- case_when(
+    row$scenario == "baseline" ~ "Baseline",
+    row$scenario == "solar_battery" ~ "Solar+Battery", 
+    row$scenario == "heat_pump_water_heater" ~ "Heat Pump WH",
+    row$scenario == "full_electrification" ~ "Full Electric",
+    TRUE ~ str_to_title(str_replace_all(row$scenario, "_", " "))
+  )
+  
+  if(row$scenario != "baseline") {
+    baseline_row <- filter(year_10_comparison, scenario == "baseline")
+    avoided <- baseline_row$total_tons - row$total_tons
+    cat("  ", scenario_label, ": ", round(row$total_tons, 2), " tons/year (", 
+        round(avoided, 2), " tons avoided)\n", sep="")
+  } else {
+    cat("  ", scenario_label, ": ", round(row$total_tons, 2), " tons/year (reference)\n", sep="")
+  }
+}
+
+# Radiative forcing at critical timepoints
+cat("\nRADIATIVE FORCING (20-year tipping points window):\n")
+forcing_20yr_comparison <- rf_combined %>% 
+  filter(year == 20) %>%
+  arrange(desc(cumulative_forcing_20yr))
+
+baseline_forcing <- filter(forcing_20yr_comparison, scenario == "baseline")$cumulative_forcing_20yr
+for(i in 1:nrow(forcing_20yr_comparison)) {
+  row <- forcing_20yr_comparison[i, ]
+  scenario_label <- case_when(
+    row$scenario == "baseline" ~ "Baseline",
+    row$scenario == "solar_battery" ~ "Solar+Battery",
+    row$scenario == "heat_pump_water_heater" ~ "Heat Pump WH", 
+    row$scenario == "full_electrification" ~ "Full Electric",
+    TRUE ~ str_to_title(str_replace_all(row$scenario, "_", " "))
+  )
+  
+  if(row$scenario != "baseline") {
+    forcing_avoided <- baseline_forcing - row$cumulative_forcing_20yr
+    cat("  ", scenario_label, ": ", round(forcing_avoided, 1), " forcing-years avoided\n", sep="")
+  } else {
+    cat("  ", scenario_label, ": ", round(row$cumulative_forcing_20yr, 1), " forcing-years (reference)\n", sep="")
+  }
+}
+
+# Key technical findings
+cat("\n=== KEY TECHNICAL FINDINGS ===\n")
+cat("Supply chain corrections:\n")
+cat("- Natural gas 4.5% methane leakage (vs EPA 2.5%) adds", 
+    round((realistic_gas_impact$total_co2e_lbs - (realistic_gas_impact$combustion_co2_lbs + realistic_gas_impact$upstream_co2_lbs))/realistic_gas_impact$total_co2e_lbs*100, 0), 
+    "% to gas emissions\n")
+cat("- Grid dispatch model shows nuclear-dominant baseload (cleaner night) vs gas peaker peaks\n")
+cat("- Complete manufacturing LCA includes electrical service upgrade (195 kg CO2e)\n")
+
+cat("\nBattery grid interaction:\n")
+if(battery_complete_value$peak_offpeak_ratio < 1) {
+  cat("- Off-peak baseload emits MORE than peak hours (", round(battery_complete_value$peak_offpeak_ratio, 2), "x ratio)\n")
+  cat("- Battery load shifting increases emissions by avoiding cleaner peak generation\n")
+} else {
+  cat("- Peak hours emit more than baseload (", round(battery_complete_value$peak_offpeak_ratio, 2), "x ratio)\n")
+  cat("- Battery load shifting reduces emissions by avoiding dirty peak generation\n")
+}
+
+cat("\nMethane vs CO2 dynamics:\n")
+cat("- Methane: 84x warming over 20 years, 9.5-year atmospheric lifetime\n")
+cat("- CO2: Lower immediate impact, centuries atmospheric lifetime\n")
+cat("- Heat pump options eliminate methane immediately\n") 
+cat("- Solar options reduce long-term CO2 accumulation\n")
+
+# Export complete data
+cat("\n=== DATA EXPORT ===\n")
+save(complete_results, dual_effectiveness, rf_combined, battery_complete_value, 
+     emissions_factors_complete, standard_ranking, forcing_ranking,
+     file = file.path(output_dir, "complete_emissions_tipping_analysis.RData"))
+
+cat("Complete analysis saved to:", file.path(output_dir, "complete_emissions_tipping_analysis.RData"), "\n")
+cat("All data presented objectively for tipping points decision framework\n")
+cat("Interpretation regarding climate urgency left to decision-maker\n")
+
+# Final decision framework summary
+cat("\n=== DECISION FRAMEWORK SUMMARY ===\n")
+cat("Data supports different conclusions depending on climate urgency assessment:\n\n")
+
+cat("If standard cost-effectiveness prioritized:\n")
+cat("  Best option: ", standard_ranking$scenario_name[1], " ($", round(standard_ranking$cost_per_ton_standard[1], 0), "/ton)\n", sep="")
+cat("  Solar+battery ranking: #", solar_battery_standard_rank, " of ", nrow(standard_ranking), "\n", sep="")
+
+cat("\nIf tipping points urgency prioritized:\n")
+cat("  Best option: ", forcing_ranking$scenario_name[1], " ($", round(forcing_ranking$cost_per_forcing_unit[1], 0), "/forcing unit)\n", sep="")
+cat("  Solar+battery ranking: #", solar_battery_forcing_rank, " of ", nrow(forcing_ranking), "\n", sep="")
+
+cat("\nTax credit deadline: December 31, 2025\n")
+cat("Decision timeline: ", as.numeric(as.Date("2025-12-31") - Sys.Date()), " days remaining\n", sep="")
