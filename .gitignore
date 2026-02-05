@@ -1,0 +1,5 @@
+scripts/*_files/
+scripts/rsconnect/
+scripts/*.html
+scripts/*.log
+scripts/*.tex
