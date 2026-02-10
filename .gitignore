@@ -3,3 +3,4 @@ scripts/rsconnect/
 scripts/*.html
 scripts/*.log
 scripts/*.tex
+.Rhistory
