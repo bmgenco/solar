@@ -1,0 +1,980 @@
+---
+title: "SOCO Emissions Analysis: Solar + Battery Climate Impact"
+subtitle: "Temporal Emissions with GA Power Dispatch & TROPOMI Methane Corrections"
+author: "Brandon Genco — Tagae Solutions"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    code_folding: hide
+    fig_width: 10
+    fig_height: 7
+  pdf_document:
+    toc: true
+    fig_width: 10
+    fig_height: 7
+    keep_tex: false
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+r_scriptwd <- getwd()
+wd <- dirname(r_scriptwd)
+knitr::opts_knit$set(root.dir = wd)
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.width = 10, fig.height = 7, dpi = 300, fig.align = "center"
+)
+
+packages <- c("tidyverse", "lubridate", "kableExtra", "scales", "viridis", "patchwork")
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+# 1. Load House Profile
+
+```{r load_house_data}
+if (!file.exists("output/house_profile.RData")) {
+
+  stop("house_profile.RData not found. Run house_component_v11.Rmd first.")
+}
+load("output/house_profile.RData")
+stopifnot(exists("house_profile"))
+
+cat("House profile version:", house_profile$version, "\n")
+cat("Validation:", house_profile$gas_appliance_breakdown$validation_status, "\n")
+```
+
+# 2. Parameters
+
+All input parameters are defined here. Downstream chunks reference this block only —
+no hardcoded values elsewhere.
+
+```{r parameters}
+# ===========================================================================
+# SYSTEM CONFIGURATION — from house_profile
+# ===========================================================================
+solar_kw        <- house_profile$installer_system_full$system_size_dc
+solar_annual_kwh <- house_profile$installer_system_full$annual_production_estimate
+battery_kwh     <- house_profile$installer_system_full$battery_capacity_kwh
+battery_usable  <- 8.5   # 85% DoD for LFP chemistry
+battery_efficiency <- 0.96
+
+baseline_electric_kwh <- house_profile$baseline_consumption$annual_kwh_electric
+baseline_gas_therms   <- house_profile$baseline_consumption$annual_therms_gas
+
+stove_therms  <- house_profile$baseline_consumption$gas_appliance_breakdown$stove_therms
+wh_therms     <- house_profile$baseline_consumption$gas_appliance_breakdown$water_heater_therms
+hvac_therms   <- house_profile$baseline_consumption$gas_appliance_breakdown$hvac_therms
+
+# ===========================================================================
+# METHANE & CLIMATE PARAMETERS
+# ===========================================================================
+# IPCC AR6 WG1, Chapter 7, Table 7.15 (CH4-fossil row)
+ch4_gwp_20   <- 82.5   # ± 25.8; corrected from 84
+ch4_gwp_100  <- 29.8   # ± 11
+ch4_lifetime <- 9.5    # years, atmospheric
+
+# Methane leakage scenarios
+# ⚠️ TROPOMI 4.5% NEEDS VERIFICATION — see TODO.md
+leakage_scenarios <- list(
+  epa = list(
+    name = "EPA GHGI", rate = 0.023,
+    source = "EPA bottom-up facility reports (2024)"
+  ),
+  alvarez = list(
+    name = "Alvarez et al. 2018", rate = 0.037,
+    source = "Science 361:186-188, facility-scale synthesis"
+  ),
+  tropomi = list(
+    name = "TROPOMI Satellite", rate = 0.045,
+    source = "Nesser et al. 2024 ACP 24:5069-5091 — NEEDS VERIFICATION"
+  ),
+  edf = list(
+    name = "EDF MethaneAIR", rate = 0.092,
+    source = "EDF aircraft campaigns, surveyed basins"
+  )
+)
+
+# Active leakage rate for main analysis
+ch4_leakage_rate <- 0.045  # TROPOMI — flagged in TODO.md
+
+# Natural gas combustion
+co2_per_therm     <- 11.7   # lbs CO2 direct combustion
+upstream_co2_per_therm <- 1.8  # lbs CO2 extraction & transport
+ch4_lbs_per_therm <- 2.5    # lbs CH4 content per therm
+
+# Derived: total CO2e per therm (20-year GWP)
+total_co2e_per_therm <- (co2_per_therm + upstream_co2_per_therm) +
+  (ch4_lbs_per_therm * ch4_leakage_rate * ch4_gwp_20)
+
+# ===========================================================================
+# GRID EMISSIONS — by generation type (lbs CO2e/kWh at busbar)
+# Now includes upstream fugitive methane for gas types.
+#
+# Heat rates (EIA 2022, "Combined-cycle power plants"):
+#   Gas CC: 7,146 BTU/kWh = 0.07146 therms/kWh
+#   Gas CT: 10,000 BTU/kWh = 0.10 therms/kWh
+#
+# Methane leakage per kWh for gas generation:
+#   CH4 per kWh = heat_rate_therms × ch4_lbs_per_therm × ch4_leakage_rate
+#   CO2e per kWh = CH4 per kWh × ch4_gwp_20
+# ===========================================================================
+heat_rate_cc <- 0.07146   # therms/kWh (EIA avg CC, 7,146 BTU/kWh)
+heat_rate_ct <- 0.10      # therms/kWh (EIA avg CT, ~10,000 BTU/kWh)
+
+ch4_leakage_cc <- heat_rate_cc * ch4_lbs_per_therm * ch4_leakage_rate * ch4_gwp_20
+ch4_leakage_ct <- heat_rate_ct * ch4_lbs_per_therm * ch4_leakage_rate * ch4_gwp_20
+
+# CO2-only factors (EPA eGRID 2024)
+co2_only <- list(
+  nuclear = 0,
+  coal    = 2.23,   # lignite/sub-bituminous
+  gas_cc  = 0.91,   # combined cycle
+  gas_ct  = 1.22,   # combustion turbine (peaker)
+  solar   = 0,
+  other   = 0.10    # hydro, imports, biomass average
+)
+
+# Full CO2e factors (CO2 + upstream fugitive CH4 from gas supply chain)
+emissions_by_type <- list(
+  nuclear = 0,
+  coal    = 2.23,                   # coal bed methane NOT included (conservative)
+  gas_cc  = co2_only$gas_cc + ch4_leakage_cc,   # 0.91 + 0.66 ≈ 1.57
+  gas_ct  = co2_only$gas_ct + ch4_leakage_ct,   # 1.22 + 0.93 ≈ 2.15
+  solar   = 0,
+  other   = 0.10
+)
+
+# GA Power IRP grid evolution (PSC Docket 44160)
+grid_evolution <- data.frame(
+  year          = c(2025, 2030, 2035, 2040),
+  coal_pct      = c(35,   20,    5,    0),
+  gas_pct       = c(45,   50,   45,   35),
+  nuclear_pct   = c(15,   20,   25,   25),
+  renewable_pct = c( 5,   10,   25,   40)
+)
+
+# ===========================================================================
+# COST SCENARIOS
+# ===========================================================================
+cost_personal   <- 28934   # actual (incl $1800 service upgrade, 2nd battery free)
+cost_hypo_1batt <- 27134   # hypothetical 1 battery, no service upgrade
+cost_hypo_2batt <- 35134   # hypothetical 2 batteries
+cost_hpwh       <- 4500
+cost_hp_hvac    <- 15000
+
+# ===========================================================================
+# MANUFACTURING LCA (metric tons CO2e)
+# ===========================================================================
+mfg_panels    <- 3.23   # Maxeon cradle-to-grave
+mfg_battery   <- 0.85   # 10 kWh × 85 kg/kWh / 1000 (IEA 2022, Kim et al. 2016)
+mfg_bos       <- 0.35   # inverters, racking
+mfg_electrical <- 0.80  # 200A panel upgrade
+mfg_shipping  <- 0.18   # Malaysia/China → USA
+mfg_hpwh      <- 0.15
+mfg_hp_hvac   <- 0.30
+mfg_solar_total <- mfg_panels + mfg_bos + mfg_electrical + mfg_shipping
+mfg_system_total <- mfg_solar_total + mfg_battery
+
+cat("=== KEY PARAMETERS ===\n")
+cat("GWP-20 (CH4-fossil):", ch4_gwp_20, "\n")
+cat("Methane leakage rate:", ch4_leakage_rate * 100, "% (NEEDS VERIFICATION)\n")
+cat("Total CO2e per therm:", round(total_co2e_per_therm, 2), "lbs\n")
+cat("Gas CC (CO2e):", round(emissions_by_type$gas_cc, 2),
+    "lbs/kWh (CO2:", co2_only$gas_cc, "+ CH4:", round(ch4_leakage_cc, 2), ")\n")
+cat("Gas CT (CO2e):", round(emissions_by_type$gas_ct, 2),
+    "lbs/kWh (CO2:", co2_only$gas_ct, "+ CH4:", round(ch4_leakage_ct, 2), ")\n")
+cat("Battery capacity:", battery_kwh, "kWh\n")
+```
+
+# 3. Hourly Dispatch Model
+
+Merit-order dispatch model for SOCO/Georgia Power. Generates hourly emissions
+factors by season. This will eventually be replaced or validated by EIA-930 data
+(see stub in Section 12).
+ 
+```{r dispatch_model}
+calculate_hourly_emissions <- function(hour, month, grid_year = 2025) {
+  # Hourly dispatch shares based on Southern Company 2024 energy mix.
+  #
+  # Annual mix (Southern Co. Fact Sheet, March 2025):
+  #   Gas 49%, Nuclear 19%, Coal 18%, Renewables 14%
+  #
+  # Key corrections from original model:
+  #   1. Nuclear share at night is HIGH (~38%) — Vogtle 3+4 + Hatch + Farley
+  #   2. Gas CC runs as BASELOAD (~20% even at night) — not only peak
+  #   3. Coal share much lower than original model (18% annual, not 65%)
+  #   4. Emissions_by_type already includes methane leakage for gas
+  #
+  # ⚠️ ESTIMATED shares pending EIA-930 hourly validation
+  
+  if (hour >= 0 & hour < 6) {
+    # Night: nuclear + coal baseload, some gas CC baseload
+    shares <- c(nuclear = 0.38, coal = 0.27, gas_cc = 0.20,
+                gas_ct = 0.00, solar = 0.00, other = 0.15)
+    
+  } else if (hour >= 6 & hour < 10) {
+    # Morning ramp: gas CC ramps up, some solar starting
+    shares <- c(nuclear = 0.28, coal = 0.22, gas_cc = 0.35,
+                gas_ct = 0.00, solar = 0.05, other = 0.10)
+    
+  } else if (hour >= 10 & hour < 14) {
+    # Midday: solar peaks, gas CC holds, coal ramps down
+    if (month %in% 5:9) {
+      shares <- c(nuclear = 0.22, coal = 0.15, gas_cc = 0.28,
+                  gas_ct = 0.00, solar = 0.25, other = 0.10)
+    } else {
+      shares <- c(nuclear = 0.25, coal = 0.20, gas_cc = 0.38,
+                  gas_ct = 0.00, solar = 0.07, other = 0.10)
+    }
+    
+  } else if (hour >= 14 & hour < 19) {
+    # Peak: gas CT peakers fire up — DIRTIEST with methane included
+    sol <- ifelse(month %in% 5:9 & hour < 18, 0.08, 0.02)
+    shares <- c(nuclear = 0.17, coal = 0.15, gas_cc = 0.32,
+                gas_ct = 0.18, solar = sol, other = 0.10)
+    
+  } else {
+    # Evening ramp down: peakers shutting, gas CC reducing
+    shares <- c(nuclear = 0.30, coal = 0.22, gas_cc = 0.33,
+                gas_ct = 0.05, solar = 0.00, other = 0.10)
+  }
+  
+  # Weighted emissions factor (lbs CO2e/kWh) — methane already in type factors
+  ef <- shares["nuclear"] * emissions_by_type$nuclear +
+    shares["coal"]    * emissions_by_type$coal +
+    shares["gas_cc"]  * emissions_by_type$gas_cc +
+    shares["gas_ct"]  * emissions_by_type$gas_ct +
+    shares["solar"]   * emissions_by_type$solar +
+    shares["other"]   * emissions_by_type$other
+  
+  # Grid evolution scaling
+  year_factor <- approx(grid_evolution$year, c(1.0, 0.85, 0.65, 0.45),
+                        xout = grid_year, rule = 2)$y
+  
+  # Transmission losses (10%)
+  as.numeric(ef * year_factor * 1.1)
+}
+
+# Generate seasonal profiles
+make_profile <- function(season, year = 2025) {
+  month <- ifelse(season == "summer", 7, 1)
+  data.frame(
+    hour = 0:23,
+    emissions_factor = sapply(0:23, calculate_hourly_emissions, month = month, grid_year = year),
+    season = season,
+    year = year
+  )
+}
+
+summer_profile <- make_profile("summer")
+winter_profile <- make_profile("winter")
+
+# Key dispatch metrics (summer baseline)
+peak_ef     <- mean(filter(summer_profile, hour >= 14, hour < 19)$emissions_factor)
+baseload_ef <- mean(filter(summer_profile, hour >= 0,  hour < 6)$emissions_factor)
+evening_ef  <- mean(filter(summer_profile, hour >= 19, hour < 23)$emissions_factor)
+avg_grid_ef <- mean(summer_profile$emissions_factor)
+
+cat("=== DISPATCH METRICS (summer 2025, TROPOMI methane-inclusive) ===\n")
+cat("Peak (2-7 PM):", round(peak_ef, 3), "lbs CO2e/kWh\n")
+cat("Baseload (12-6 AM):", round(baseload_ef, 3), "lbs CO2e/kWh\n")
+cat("Evening (7-11 PM):", round(evening_ef, 3), "lbs CO2e/kWh\n")
+cat("Temporal arbitrage:", round((peak_ef / baseload_ef - 1) * 100, 0), "% higher at peak\n")
+cat("\nGas CC (CO2e):", round(emissions_by_type$gas_cc, 2), "lbs/kWh",
+    "(CO2:", co2_only$gas_cc, "+ CH4:", round(ch4_leakage_cc, 2), ")\n")
+cat("Gas CT (CO2e):", round(emissions_by_type$gas_ct, 2), "lbs/kWh",
+    "(CO2:", co2_only$gas_ct, "+ CH4:", round(ch4_leakage_ct, 2), ")\n")
+```
+
+```{r dispatch_plot, fig.cap="Figure: Hourly grid emissions by season. Peak hours (2-7 PM) with gas peakers produce significantly higher emissions than nighttime baseload."}
+p_dispatch <- ggplot() +
+  geom_line(data = summer_profile,
+            aes(x = hour, y = emissions_factor, color = "Summer"), linewidth = 1.2) +
+  geom_line(data = winter_profile,
+            aes(x = hour, y = emissions_factor, color = "Winter"), linewidth = 1.2) +
+  annotate("rect", xmin = 14, xmax = 19, ymin = 0, ymax = Inf,
+           alpha = 0.15, fill = "red") +
+  annotate("rect", xmin = 0, xmax = 6, ymin = 0, ymax = Inf,
+           alpha = 0.08, fill = "blue") +
+  annotate("text", x = 16.5, y = 0.4,
+           label = "PEAK\nGas Peakers", size = 3.5, fontface = "bold", color = "darkred") +
+  annotate("text", x = 3, y = 0.4,
+           label = "BASELOAD\nNuclear/Coal", size = 3.5, fontface = "bold", color = "darkblue") +
+  geom_hline(yintercept = avg_grid_ef, linetype = "dashed", alpha = 0.5) +
+  scale_x_continuous(breaks = seq(0, 23, 3)) +
+  scale_color_manual(values = c("Summer" = "#E74C3C", "Winter" = "#3498DB")) +
+  labs(title = "Georgia Power Hourly Emissions: Merit Order Dispatch",
+       subtitle = paste0("Peak hours ", round((peak_ef / baseload_ef - 1) * 100, 0),
+                         "% higher emissions than baseload"),
+       x = "Hour of Day", y = "Emissions Factor (lbs CO₂e/kWh)", color = "Season") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+print(p_dispatch)
+```
+
+# 5. Temporal Arbitrage Analysis
+
+Solar + battery creates an 8-hour methane avoidance window:
+
+- **2-7 PM**: Direct solar export during gas peaker dispatch
+- **7-10 PM**: Battery discharge extends evening avoidance
+- **10 PM-6 AM**: Grid import from cleaner baseload
+
+Note: Methane leakage is already included in the dispatch model emissions factors.
+No separate TROPOMI correction layer needed.
+
+```{r temporal_arbitrage}
+# Hourly energy flows (typical summer day)
+solar_curve <- c(rep(0, 6), 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 3.5,
+                 3.0, 2.5, 2.0, 1.5, 1.0, 0.5, 0.2, rep(0, 3))
+
+consumption_curve <- c(0.5, 0.4, 0.4, 0.4, 0.4, 0.6, 0.8, 1.0, 0.9, 0.8, 0.7, 0.7,
+                       0.8, 0.9, 1.2, 1.4, 1.5, 1.6, 1.4, 1.2, 1.0, 0.8, 0.6, 0.5)
+
+# Battery operation: charge from excess solar midday, discharge evening peak
+# 10 kWh over 2hr charge / 4hr discharge
+batt_action <- case_when(
+  0:23 >= 12 & 0:23 < 14 ~ "charge",
+  0:23 >= 19 & 0:23 < 23 ~ "discharge",
+  TRUE ~ "idle"
+)
+
+batt_kwh_hourly <- case_when(
+  batt_action == "charge"    ~  (battery_kwh / 2) * (1 / battery_efficiency),
+  batt_action == "discharge" ~ -(battery_kwh / 4) * battery_efficiency,
+  TRUE ~ 0
+)
+
+# Emissions factors from dispatch model (already methane-inclusive)
+ef_hourly <- summer_profile$emissions_factor
+
+hourly_data <- data.frame(
+  hour = 0:23,
+  solar = solar_curve,
+  consumption = consumption_curve,
+  net_gen = solar_curve - consumption_curve,
+  battery_action = batt_action,
+  battery_kwh = batt_kwh_hourly,
+  ef = ef_hourly
+) %>%
+  mutate(
+    # Net grid flow with battery
+    net_grid = net_gen - battery_kwh,
+    # Emissions for each scenario
+    baseline_emissions = consumption * ef,
+    solar_only_emissions = ifelse(net_gen > 0,
+                                  -net_gen * ef,
+                                  -net_gen * ef),
+    solar_battery_emissions = ifelse(net_grid > 0,
+                                     -net_grid * ef,
+                                     -net_grid * ef),
+    period = case_when(
+      hour >= 12 & hour < 14 ~ "Battery Charge (Solar)",
+      hour >= 14 & hour < 19 ~ "Solar Direct Export",
+      hour >= 19 & hour < 23 ~ "Battery Discharge",
+      TRUE ~ "Grid Import"
+    )
+  )
+
+# Annual benefits (methane-inclusive dispatch)
+peak_export_kwh  <- 1800  # estimated annual kWh exported during 2-7 PM
+night_import_kwh <- 2100  # estimated annual kWh imported during baseload
+
+peak_export_avoided   <- peak_export_kwh * peak_ef / 2000
+night_import_added    <- night_import_kwh * baseload_ef / 2000
+net_grid_benefit      <- peak_export_avoided - night_import_added
+
+battery_daily_kwh     <- battery_kwh * battery_efficiency
+battery_annual_benefit <- battery_daily_kwh * evening_ef * 365 / 2000
+
+# Two-battery breakdown
+batt_5kwh_annual  <- (5 * battery_efficiency) * evening_ef * 365 / 2000
+batt_10kwh_annual <- battery_annual_benefit
+
+total_system_benefit <- net_grid_benefit + battery_annual_benefit
+
+cat("=== TEMPORAL ARBITRAGE (methane-inclusive dispatch) ===\n")
+cat("Peak exports avoided:", round(peak_export_avoided, 2), "tons/yr\n")
+cat("Night imports added:", round(night_import_added, 2), "tons/yr\n")
+cat("Net grid benefit:", round(net_grid_benefit, 2), "tons/yr\n")
+cat("Battery evening (10 kWh):", round(battery_annual_benefit, 2), "tons/yr\n")
+cat("TOTAL SYSTEM BENEFIT:", round(total_system_benefit, 2), "tons CO2e/yr\n")
+cat("\nBattery comparison:\n")
+cat("  5 kWh:", round(batt_5kwh_annual, 2), "tons/yr\n")
+cat("  10 kWh:", round(batt_10kwh_annual, 2), "tons/yr\n")
+cat("  2nd battery incremental:", round(batt_10kwh_annual - batt_5kwh_annual, 2), "tons/yr\n")
+```
+
+```{r temporal_arbitrage_plot, fig.height=8, fig.cap="Figure: Dual y-axes show grid emissions variation (right) alongside power flows (left). TROPOMI corrections increase peak emissions, making temporal arbitrage more valuable."}
+# Dual y-axes plot: power (left) + emissions (right)
+# Scale emissions to fit on power axis, then use sec_axis to label
+ef_range <- range(hourly_data$ef)
+ef_min <- floor(ef_range[1] * 10) / 10
+ef_max <- ceiling(ef_range[2] * 10) / 10
+power_max <- 6
+
+# Linear transform: emissions → power axis scale
+# ef_min maps to 0, ef_max maps to power_max
+scale_ef <- function(ef) (ef - ef_min) / (ef_max - ef_min) * power_max
+inv_scale_ef <- function(y) y / power_max * (ef_max - ef_min) + ef_min
+
+p_arbitrage <- ggplot(hourly_data, aes(x = hour)) +
+  # Background shading
+  annotate("rect", xmin = 14, xmax = 19, ymin = 0, ymax = power_max,
+           fill = "orange", alpha = 0.15) +
+  annotate("rect", xmin = 19, xmax = 23, ymin = 0, ymax = power_max,
+           fill = "green", alpha = 0.15) +
+  annotate("rect", xmin = 0, xmax = 6, ymin = 0, ymax = power_max,
+           fill = "blue", alpha = 0.08) +
+  
+  # Solar generation
+  geom_area(aes(y = solar, fill = "Solar Generation"), alpha = 0.5) +
+  
+  # House consumption
+  geom_line(aes(y = consumption, color = "House Load"), linewidth = 1.2) +
+  
+  # Grid emissions (methane-inclusive, scaled to power axis)
+  geom_line(aes(y = scale_ef(ef), color = "Grid Emissions (CO₂e)"),
+            linewidth = 1.5, linetype = "dashed") +
+  
+  # Battery indicators
+  geom_point(data = filter(hourly_data, battery_action == "charge"),
+             aes(y = 5, color = "Battery Charge"), size = 4, shape = 17) +
+  geom_point(data = filter(hourly_data, battery_action == "discharge"),
+             aes(y = 5, color = "Battery Discharge"), size = 4, shape = 19) +
+  
+  # Annotations
+  annotate("text", x = 16.5, y = 5.6,
+           label = paste0("EXPORT\n2-7 PM Peak\n+", round(peak_export_avoided, 1), " tons/yr"),
+           color = "darkorange", fontface = "bold", size = 3.2) +
+  annotate("text", x = 21, y = 5.6,
+           label = paste0("BATTERY\n7-11 PM\n+", round(battery_annual_benefit, 1), " tons/yr"),
+           color = "darkgreen", fontface = "bold", size = 3.2) +
+  annotate("text", x = 3, y = 5.6,
+           label = paste0("IMPORT\n10 PM-6 AM\n-", round(night_import_added, 1), " tons/yr"),
+           color = "darkblue", fontface = "bold", size = 3.2) +
+  
+  # Scales
+  scale_y_continuous(
+    name = "Power (kW)",
+    limits = c(0, power_max),
+    sec.axis = sec_axis(~ inv_scale_ef(.), name = "Grid Emissions (lbs CO₂e/kWh)")
+  ) +
+  scale_x_continuous(breaks = seq(0, 23, 3)) +
+  scale_fill_manual(values = c("Solar Generation" = "gold")) +
+  scale_color_manual(values = c(
+    "House Load" = "black",
+    "Grid Emissions (CO₂e)" = "red",
+    "Battery Charge" = "purple",
+    "Battery Discharge" = "darkgreen"
+  )) +
+  
+  labs(title = "Temporal Arbitrage: 8-Hour Methane Avoidance Window",
+       subtitle = paste0("Methane-inclusive (", ch4_leakage_rate*100, "% leakage, GWP-20=",
+                         ch4_gwp_20, ") | Peak: ", round(peak_ef, 2),
+                         " | Baseload: ", round(baseload_ef, 2),
+                         " | ", round((peak_ef / baseload_ef - 1) * 100, 0),
+                         "% differential"),
+       x = "Hour of Day", fill = "", color = "") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom",
+        legend.box = "vertical",
+        axis.title.y.right = element_text(color = "red"))
+
+print(p_arbitrage)
+```
+
+# 6. Baseline Emissions Breakdown
+
+```{r baseline_emissions}
+# Gas supply chain
+gas_combustion_co2 <- baseline_gas_therms * co2_per_therm / 2000
+gas_upstream_co2   <- baseline_gas_therms * upstream_co2_per_therm / 2000
+gas_fugitive_ch4_lbs <- baseline_gas_therms * ch4_leakage_rate * ch4_lbs_per_therm
+gas_fugitive_co2e  <- gas_fugitive_ch4_lbs * ch4_gwp_20 / 2000
+gas_total <- gas_combustion_co2 + gas_upstream_co2 + gas_fugitive_co2e
+
+# Grid electricity (methane-inclusive annual average)
+electric_total <- baseline_electric_kwh * avg_grid_ef / 2000
+
+# Total baseline
+total_baseline <- gas_total + electric_total
+
+baseline_breakdown <- data.frame(
+  Source = c("Natural Gas — Combustion CO₂",
+             "Natural Gas — Upstream CO₂",
+             "Natural Gas — Fugitive CH₄",
+             "Natural Gas Subtotal",
+             "Grid Electricity (CH₄-inclusive avg)",
+             "TOTAL BASELINE"),
+  `Annual Emissions` = c(
+    round(gas_combustion_co2, 2),
+    round(gas_upstream_co2, 2),
+    round(gas_fugitive_co2e, 2),
+    round(gas_total, 2),
+    round(electric_total, 2),
+    round(total_baseline, 2)
+  ),
+  Percent = c(
+    round(gas_combustion_co2 / total_baseline * 100, 0),
+    round(gas_upstream_co2 / total_baseline * 100, 0),
+    round(gas_fugitive_co2e / total_baseline * 100, 0),
+    round(gas_total / total_baseline * 100, 0),
+    round(electric_total / total_baseline * 100, 0),
+    100
+  ),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+baseline_breakdown %>%
+  kable(caption = "Baseline Emissions with TROPOMI Methane (GWP-20 = 82.5)",
+        col.names = c("Source", "tons CO₂e/yr", "%")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 14) %>%
+  row_spec(4, bold = TRUE, background = "#fff3cd") %>%
+  row_spec(6, bold = TRUE, background = "#d4edda")
+```
+
+# 7. Scenario Comparison
+
+```{r scenario_analysis}
+calculate_scenario <- function(scenario, years = 25) {
+  results <- data.frame(year = 0:years)
+  
+  # Manufacturing (year 0)
+  mfg <- 0
+  if (grepl("solar", scenario))      mfg <- mfg + mfg_solar_total
+  if (grepl("battery|batt", scenario)) mfg <- mfg + mfg_battery
+  if (grepl("hpwh", scenario))        mfg <- mfg + mfg_hpwh
+  if (grepl("hp_hvac|full", scenario)) mfg <- mfg + mfg_hp_hvac
+  
+  for (i in seq_len(nrow(results))) {
+    yr <- results$year[i]
+    grid_year <- min(2025 + yr, 2040)
+    
+    # Grid evolution factor
+    gef <- approx(grid_evolution$year, c(1.0, 0.85, 0.65, 0.45),
+                  xout = grid_year, rule = 2)$y
+    
+    # Base calculations
+    elec_kwh <- baseline_electric_kwh
+    gas_therms <- baseline_gas_therms
+    solar_benefit <- 0
+    battery_benefit_val <- 0
+    
+    # Scenario modifications
+    if (scenario == "baseline") {
+      # no changes
+      
+    } else if (scenario == "solar_only") {
+      solar_benefit <- net_grid_benefit * (1 - 0.005)^yr
+      
+    } else if (scenario == "solar_battery_5kwh") {
+      solar_benefit <- net_grid_benefit * (1 - 0.005)^yr
+      battery_benefit_val <- batt_5kwh_annual * ifelse(yr <= 15, 1, 0.8)
+      
+    } else if (scenario == "solar_battery") {
+      solar_benefit <- net_grid_benefit * (1 - 0.005)^yr
+      battery_benefit_val <- batt_10kwh_annual * ifelse(yr <= 15, 1, 0.8)
+      
+    } else if (scenario == "electrify_hvac_hpwh") {
+      gas_therms <- stove_therms  # only stove remains
+      elec_kwh <- baseline_electric_kwh + 7400  # heat pump load
+      
+    } else if (scenario == "hpwh_only") {
+      gas_therms <- stove_therms + hvac_therms
+      elec_kwh <- baseline_electric_kwh + 2400
+      
+    } else if (scenario == "solar_battery_hpwh") {
+      gas_therms <- stove_therms + hvac_therms
+      elec_kwh <- baseline_electric_kwh + 2400
+      solar_benefit <- net_grid_benefit * (1 - 0.005)^yr
+      battery_benefit_val <- batt_10kwh_annual * ifelse(yr <= 15, 1, 0.8)
+      
+    } else if (scenario == "full_electrification") {
+      gas_therms <- stove_therms
+      elec_kwh <- baseline_electric_kwh + 7400
+      solar_benefit <- net_grid_benefit * (1 - 0.005)^yr
+      battery_benefit_val <- batt_10kwh_annual * ifelse(yr <= 15, 1, 0.8)
+    }
+    
+    # Electric emissions
+    elec_em <- elec_kwh * avg_grid_ef * gef / 2000 - solar_benefit - battery_benefit_val
+    
+    # Gas emissions
+    gas_em <- gas_therms * total_co2e_per_therm / 2000
+    
+    results$electric_emissions[i] <- max(elec_em, 0)
+    results$gas_emissions[i]      <- gas_em
+    results$manufacturing[i]      <- ifelse(yr == 0, mfg, 0)
+    results$total[i]              <- results$electric_emissions[i] +
+      results$gas_emissions[i] + results$manufacturing[i]
+  }
+  
+  results$scenario <- scenario
+  results
+}
+
+scenarios <- c("baseline", "solar_only", "solar_battery_5kwh", "solar_battery",
+               "electrify_hvac_hpwh", "hpwh_only",
+               "solar_battery_hpwh", "full_electrification")
+
+all_results <- map_df(scenarios, calculate_scenario)
+
+# Labels
+scenario_labels <- c(
+  baseline             = "Baseline",
+  solar_only           = "Solar Only",
+  solar_battery_5kwh   = "Solar + 5 kWh Battery",
+  solar_battery        = "Solar + 10 kWh Battery",
+  electrify_hvac_hpwh  = "Full Electrification (no solar)",
+  hpwh_only            = "Heat Pump Water Heater Only",
+  solar_battery_hpwh   = "Solar + 10 kWh + HPWH",
+  full_electrification = "Solar + 10 kWh + Full Electric"
+)
+```
+
+```{r scenario_plot, fig.height=8, fig.cap="Figure: 25-year emissions trajectories. Grid decarbonization makes all scenarios converge long-term."}
+p_scenarios <- ggplot(all_results, aes(x = year, y = total, color = scenario)) +
+  geom_line(linewidth = 0.8, alpha = 0.7) +
+  geom_line(data = filter(all_results, scenario %in% c("solar_battery", "electrify_hvac_hpwh")),
+            linewidth = 1.8) +
+  scale_color_viridis_d(labels = scenario_labels) +
+  geom_hline(yintercept = 0, linetype = "dotted", alpha = 0.5) +
+  labs(title = "25-Year Emissions Trajectories",
+       subtitle = "Bold: Solar+10kWh vs Full Electrification (main comparison)",
+       x = "Years After Installation", y = "Annual Emissions (tons CO₂e)",
+       color = "Scenario") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom",
+        legend.text = element_text(size = 9))
+
+print(p_scenarios)
+```
+
+# 8. Radiative Forcing & Tipping Points
+
+Separate CO₂ (centuries lifetime) from CH₄ (9.5-year lifetime).
+Cumulative forcing — the area under the curve — drives actual temperature change.
+
+```{r radiative_forcing}
+calc_forcing <- function(scenario_name) {
+  years <- 0:50
+  
+  # Annual CO2 and CH4 by scenario
+  if (scenario_name == "baseline") {
+    co2_annual <- gas_combustion_co2 + gas_upstream_co2 + electric_total
+    ch4_annual <- gas_fugitive_ch4_lbs / 2000   # tons CH4 (mass, not CO2e)
+    
+  } else if (scenario_name == "solar_battery") {
+    co2_annual <- gas_combustion_co2 + gas_upstream_co2 +
+      (electric_total - total_system_benefit)
+    ch4_annual <- gas_fugitive_ch4_lbs / 2000
+    
+  } else if (scenario_name == "full_electrification") {
+    # Only stove remains; increased electric but with solar benefit
+    stove_co2 <- stove_therms * (co2_per_therm + upstream_co2_per_therm) / 2000
+    stove_ch4 <- stove_therms * ch4_leakage_rate * ch4_lbs_per_therm / 2000
+    elec_full <- (baseline_electric_kwh + 7400) * avg_grid_ef / 2000
+    co2_annual <- stove_co2 + (elec_full - total_system_benefit)
+    ch4_annual <- stove_ch4
+  }
+  
+  co2_atm <- numeric(length(years))
+  ch4_atm <- numeric(length(years))
+  co2_airborne <- 0.45
+  
+  for (i in seq_along(years)) {
+    if (i == 1) {
+      co2_atm[i] <- co2_annual * co2_airborne
+      ch4_atm[i] <- ch4_annual
+    } else {
+      co2_atm[i] <- co2_atm[i - 1] * 0.99 + co2_annual * co2_airborne
+      ch4_atm[i] <- ch4_atm[i - 1] * exp(-1 / ch4_lifetime) + ch4_annual
+    }
+  }
+  
+  co2_forcing <- co2_atm * 0.02
+  ch4_forcing <- ch4_atm * 0.84   # scaled forcing coefficient
+  total <- co2_forcing + ch4_forcing
+  
+  data.frame(
+    year = years,
+    co2_forcing = co2_forcing,
+    ch4_forcing = ch4_forcing,
+    total_forcing = total,
+    cumulative = cumsum(total),
+    scenario = scenario_name
+  )
+}
+
+rf_baseline <- calc_forcing("baseline")
+rf_solar    <- calc_forcing("solar_battery")
+rf_elec     <- calc_forcing("full_electrification")
+
+rf_all <- bind_rows(rf_baseline, rf_solar, rf_elec)
+
+# Verify correct ordering
+rf_20yr <- rf_all %>% filter(year == 20) %>% select(scenario, cumulative)
+cat("=== RADIATIVE FORCING at year 20 ===\n")
+cat("Baseline:", round(rf_20yr$cumulative[rf_20yr$scenario == "baseline"], 1), "\n")
+cat("Solar+Battery:", round(rf_20yr$cumulative[rf_20yr$scenario == "solar_battery"], 1), "\n")
+cat("Full Electrification:", round(rf_20yr$cumulative[rf_20yr$scenario == "full_electrification"], 1), "\n")
+
+# Sanity check: baseline should be highest
+stopifnot(
+  rf_20yr$cumulative[rf_20yr$scenario == "baseline"] >
+    rf_20yr$cumulative[rf_20yr$scenario == "solar_battery"]
+)
+```
+
+```{r radiative_forcing_plot, fig.cap="Figure: Cumulative radiative forcing. Baseline (red) is highest; solar+battery (blue) reduces forcing through temporal arbitrage; full electrification (green) eliminates most gas methane."}
+p_forcing <- ggplot(rf_all, aes(x = year, y = cumulative, color = scenario)) +
+  geom_line(linewidth = 1.5) +
+  annotate("rect", xmin = 0, xmax = 20, ymin = 0, ymax = Inf,
+           alpha = 0.08, fill = "red") +
+  annotate("text", x = 10, y = max(rf_all$cumulative) * 0.92,
+           label = "Critical 20-year period\n(tipping points window)",
+           size = 4, color = "darkred", fontface = "bold") +
+  geom_vline(xintercept = ch4_lifetime, linetype = "dashed", alpha = 0.5, color = "orange") +
+  annotate("text", x = ch4_lifetime, y = max(rf_all$cumulative) * 0.5,
+           label = "CH₄ lifetime", angle = 90, size = 3.5, color = "orange") +
+  scale_color_manual(
+    values = c(baseline = "#E74C3C", solar_battery = "#3498DB",
+               full_electrification = "#2ECC71"),
+    labels = c("Baseline", "Solar + 10 kWh Battery", "Full Electrification")
+  ) +
+  labs(title = "Cumulative Climate Forcing Over Time",
+       subtitle = paste0("GWP-20 = ", ch4_gwp_20, " | CH₄ lifetime = ", ch4_lifetime, " yr"),
+       x = "Years from Implementation",
+       y = "Cumulative Radiative Forcing (relative units)",
+       color = "Scenario") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "bottom")
+
+print(p_forcing)
+```
+
+# 9. Cost-Effectiveness & Decision Framework
+
+```{r cost_effectiveness}
+# Net metering table
+net_metering_table <- data.frame(
+  Component = c("Peak Solar Exports (2-7 PM)", "Baseload Imports (Night)",
+                "Net Grid Benefit", "Battery Evening (5 kWh)", "Battery Evening (10 kWh)",
+                "TOTAL — 5 kWh system", "TOTAL — 10 kWh system"),
+  `Energy Flow` = c(
+    paste0(peak_export_kwh, " kWh/yr exported"),
+    paste0(night_import_kwh, " kWh/yr imported"),
+    "Temporal arbitrage",
+    "5 kWh × 365 days", "10 kWh × 365 days",
+    "Combined", "Combined"
+  ),
+  `Emissions Factor` = c(
+    paste0(round(peak_ef, 2), " lbs/kWh"),
+    paste0(round(baseload_ef, 2), " lbs/kWh"),
+    paste0(round((peak_ef / baseload_ef - 1) * 100, 0), "% differential"),
+    paste0(round(evening_ef, 2), " lbs/kWh"),
+    paste0(round(evening_ef, 2), " lbs/kWh"),
+    "Methane-inclusive", "Methane-inclusive"
+  ),
+  `tons CO2e/yr` = c(
+    round(peak_export_avoided, 2),
+    round(-night_import_added, 2),
+    round(net_grid_benefit, 2),
+    round(batt_5kwh_annual, 2),
+    round(batt_10kwh_annual, 2),
+    round(net_grid_benefit + batt_5kwh_annual, 2),
+    round(total_system_benefit, 2)
+  ),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+net_metering_table %>%
+  kable(caption = "Net Metering + Battery Temporal Arbitrage (methane-inclusive dispatch)") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  row_spec(6, background = "#e8f4f8") %>%
+  row_spec(7, bold = TRUE, background = "#d4edda")
+
+# Scenario economics
+batt_5_total <- net_grid_benefit + batt_5kwh_annual
+economics <- data.frame(
+  Scenario = c("Solar + 5 kWh", "Solar + 10 kWh", "Solar + 10 kWh + HPWH",
+               "Full Electrification (no solar)", "Solar + 10 kWh + Full Electric"),
+  `Annual Avoided` = round(c(
+    batt_5_total,
+    total_system_benefit,
+    total_system_benefit + (wh_therms * total_co2e_per_therm / 2000),
+    (gas_total - stove_therms * total_co2e_per_therm / 2000),
+    total_system_benefit + (gas_total - stove_therms * total_co2e_per_therm / 2000)
+  ), 2),
+  `Typical Cost` = c(cost_hypo_1batt, cost_hypo_2batt,
+                     cost_hypo_2batt + cost_hpwh,
+                     cost_hpwh + cost_hp_hvac,
+                     cost_hypo_2batt + cost_hpwh + cost_hp_hvac),
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+) %>%
+  mutate(
+    `$/ton (10-yr)` = round(`Typical Cost` / (`Annual Avoided` * 10), 0),
+    `Mfg Payback (yr)` = round(mfg_system_total / `Annual Avoided`, 1)
+  )
+
+economics %>%
+  mutate(`Typical Cost` = scales::dollar(`Typical Cost`),
+         `$/ton (10-yr)` = scales::dollar(`$/ton (10-yr)`)) %>%
+  kable(caption = paste0("Cost-Effectiveness (GWP-20 = ", ch4_gwp_20,
+                         ", leakage = ", ch4_leakage_rate * 100, "%)")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  row_spec(2, bold = TRUE, background = "#d4edda")
+
+# Personal cost note
+personal_cost_per_ton <- round(cost_personal / (total_system_benefit * 10), 0)
+cat("\nActual installation cost:", scales::dollar(cost_personal), "\n")
+cat("Personal cost-effectiveness:", scales::dollar(personal_cost_per_ton), "/ton (10-yr)\n")
+```
+
+# 10. Methane Sensitivity Analysis
+
+```{r methane_sensitivity}
+sensitivity <- map_dfr(leakage_scenarios, function(sc) {
+  gas_ch4_co2e <- baseline_gas_therms * sc$rate * ch4_lbs_per_therm * ch4_gwp_20 / 2000
+  gas_co2 <- gas_combustion_co2 + gas_upstream_co2
+  gas_em <- gas_co2 + gas_ch4_co2e
+  
+  data.frame(
+    Scenario = sc$name,
+    `Leakage (%)` = sc$rate * 100,
+    `Gas Emissions` = round(gas_em, 2),
+    `Electric Emissions` = round(electric_total, 2),
+    `Total Baseline` = round(gas_em + electric_total, 2),
+    `CH₄ Share (%)` = round(gas_ch4_co2e / gas_em * 100, 0),
+    Source = sc$source,
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  )
+})
+
+sensitivity %>%
+  select(-Source) %>%
+  kable(caption = paste0("Methane Leakage Sensitivity (GWP-20 = ", ch4_gwp_20, ")")) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE, font_size = 13) %>%
+  row_spec(3, bold = TRUE, background = "#e8f5e8") %>%
+  row_spec(4, background = "#ffe6e6")
+```
+
+```{r sensitivity_plot, fig.cap="Figure: Total baseline emissions vary substantially with methane leakage assumptions."}
+p_sens <- ggplot(sensitivity, aes(x = `Leakage (%)`, y = `Total Baseline`)) +
+  geom_point(size = 4, color = "#2C3E50") +
+  geom_line(linewidth = 1, color = "#2C3E50") +
+  geom_label(aes(label = Scenario), nudge_y = 0.3, size = 3.5) +
+  geom_vline(xintercept = ch4_leakage_rate * 100, linetype = "dashed", color = "red") +
+  annotate("text", x = ch4_leakage_rate * 100, y = min(sensitivity$`Total Baseline`),
+           label = "Analysis\nbaseline", color = "red", size = 3, hjust = -0.1) +
+  labs(title = "Baseline Emissions Sensitivity to Methane Leakage Rate",
+       x = "Supply Chain Leakage Rate (%)",
+       y = "Total Annual Emissions (tons CO₂e/yr)") +
+  theme_minimal(base_size = 13)
+
+print(p_sens)
+```
+
+# 11. Methodology & Citations
+
+**Grid Dispatch Model:**
+Merit-order dispatch for SOCO balancing authority based on GA Power IRP 2025
+(PSC Docket 44160). Nuclear → Coal → Gas CC → Gas CT (peakers). Seasonal
+variation modeled for utility-scale solar contribution. To be validated against
+EIA-930 hourly data (see Section 12).
+
+**Emissions Factors:**
+
+| Parameter | Value | Source |
+|-----------|-------|--------|
+| CH₄ GWP-20 (fossil) | 82.5 ± 25.8 | IPCC AR6 WG1, Ch. 7, Table 7.15 |
+| CH₄ atmospheric lifetime | 9.5 yr | IPCC AR6 WG1 |
+| Methane leakage rate | 4.5% | ⚠️ NEEDS VERIFICATION — see TODO.md |
+| EPA GHGI leakage | 2.3% | EPA Greenhouse Gas Inventory 2024 |
+| Alvarez et al. supply chain | 2.3% | Science 361:186–188 (2018) |
+| Gas CC emissions (CO₂ only) | 0.91 lbs CO₂/kWh | EPA eGRID 2024 |
+| Gas CC emissions (CO₂e incl. CH₄) | ~1.57 lbs CO₂e/kWh | eGRID + TROPOMI 4.5% + GWP-20=82.5 |
+| Gas CT emissions (CO₂ only) | 1.22 lbs CO₂/kWh | EPA eGRID 2024 |
+| Gas CT emissions (CO₂e incl. CH₄) | ~2.15 lbs CO₂e/kWh | eGRID + TROPOMI 4.5% + GWP-20=82.5 |
+| Gas CC heat rate | 7,146 BTU/kWh | EIA "Combined-cycle power plants" (2022) |
+| Gas CT heat rate | ~10,000 BTU/kWh | EIA simple-cycle average |
+| CO₂ per therm (combustion) | 11.7 lbs | EPA GHG Emission Factors 2024 |
+| Upstream CO₂ per therm | 1.8 lbs | NETL Natural Gas LCA 2019 |
+
+**Manufacturing LCA:**
+
+| Component | Embodied CO₂e | Source |
+|-----------|--------------|--------|
+| Solar panels (6.6 kW Maxeon) | 3.23 tons | NREL/TP-6A20-56487 (2021) |
+| Battery (10 kWh LFP) | 0.85 tons | IEA Global EV Outlook 2022; Kim et al. 2016 |
+| BOS + electrical + shipping | 1.33 tons | Fraunhofer ISE 2020 |
+
+**Data Sources:**
+Emporia Vue circuit-level monitoring, Ecobee thermostat, Georgia Power billing,
+natural gas consumption records.
+
+**Known Limitations:**
+
+- Dispatch model uses IRP projections, not actual EIA-930 data (TODO)
+- 4.5% methane leakage rate attribution needs literature verification (TODO)
+- Duck curve evolution not modeled
+- Vogtle 3+4 impact on baseload mix not yet incorporated from hourly data
+
+# 12. EIA-930 SOCO Data Pull (Stub)
+
+This section will pull actual hourly generation data from the EIA-930 API
+to validate or replace the IRP-based dispatch model above.
+
+```{r eia930_stub, eval=FALSE}
+# ============================================================================
+# EIA-930 API — SOCO Balancing Authority Hourly Data
+# ============================================================================
+# Registration: https://www.eia.gov/opendata/register.php
+# BA code: SOCO (Southern Company)
+# Data available: hourly generation by fuel type since July 2018
+#
+# R package: EIAapi (CRAN)
+# Bulk downloads: https://www.eia.gov/electricity/gridmonitor/
+#
+# library(EIAapi)
+#
+# eia_key <- Sys.getenv("EIA_API_KEY")
+#
+# # Pull hourly generation for SOCO
+# soco_hourly <- eia_get(
+#   api_key = eia_key,
+#   id = "EBA.SOCO-ALL.NG.H",   # net generation, hourly
+#   start = "2024-01-01",
+#   end = "2024-12-31"
+# )
+#
+# # Fuel types available:
+# # NG (natural gas), COL (coal), NUC (nuclear), SUN (solar), WND (wind), WAT (hydro)
+#
+# # TODO: Validate modeled dispatch against actual 2024 hourly generation
+# # TODO: Calculate monthly-varying emissions factors from actual fuel mix
+# # TODO: Assess Vogtle 3+4 impact (Unit 3: July 2023, Unit 4: April 2024)
+#
+# # Alternative: GridStatus.io for visualization
+# # Alternative: WattTime API for real-time marginal emissions
+# ============================================================================
+```
+
+---
+
+**Analysis Date:** `r Sys.Date()`
+**Script:** `soco_emissions.Rmd` (unified from v13 + corrected + ga_dispatch + Jan 2026 corrections)
+**Status:** Active development — see TODO.md for outstanding issues
