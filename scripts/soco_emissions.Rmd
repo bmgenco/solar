@@ -28,11 +28,20 @@ knitr::opts_chunk$set(
   fig.width = 10, fig.height = 7, dpi = 300, fig.align = "center"
 )
 
-packages <- c("tidyverse", "lubridate", "kableExtra", "scales", "viridis", "patchwork")
+packages <- c("tidyverse", "lubridate", "kableExtra", "scales", "viridis", "patchwork", "EIAapi")
 invisible(lapply(packages, library, character.only = TRUE))
 ```
 
-# 1. Load House Profile
+
+---
+
+**Analysis Date:** `r Sys.Date()`
+**Script:** `soco_emissions.Rmd` (unified from v13 + corrected + ga_dispatch + Jan 2026 corrections)
+**Status:** Active development — see TODO.md for outstanding issues
+
+
+## 1 A house profiles
+
 
 ```{r load_house_data}
 if (!file.exists("output/house_profile.RData")) {
@@ -45,6 +54,176 @@ stopifnot(exists("house_profile"))
 cat("House profile version:", house_profile$version, "\n")
 cat("Validation:", house_profile$gas_appliance_breakdown$validation_status, "\n")
 ```
+
+
+## 1  B. EIA-930 SOCO Data Pull (Stub)
+
+This section will pull actual hourly generation data from the EIA-930 API
+to validate or replace the IRP-based dispatch model above.
+
+```{r eia930_stub, eval=FALSE}
+# ============================================================================
+# EIA-930 API — SOCO Balancing Authority Hourly Data
+# ============================================================================
+# Registration: https://www.eia.gov/opendata/register.php
+# BA code: SOCO (Southern Company)
+# Data available: hourly generation by fuel type since July 2018
+# 
+# R package: EIAapi (CRAN)
+# Bulk downloads: https://www.eia.gov/electricity/gridmonitor/
+
+
+#In terminal or R console, run once:
+# echo 'EIA_API_KEY=your_key_here' >> ~/.Renviron
+
+eia_key <- Sys.getenv("EIA_API_KEY")
+
+pull_soco <- function(year, api_key) {
+  year_start <- as.Date(paste0(year, "-01-01"))
+  year_end   <- as.Date(paste0(year, "-12-31"))
+  starts <- seq(year_start, year_end, by = 20)
+  
+  chunks <- list()
+  for (i in seq_along(starts)) {
+    end_d <- min(starts[i] + 19, year_end)
+    s <- paste0(format(starts[i], "%Y-%m-%d"), "T00")
+    e <- paste0(format(end_d, "%Y-%m-%d"), "T23")
+    cat("Pulling", s, "to", e, "\n")
+    
+    chunks[[i]] <- eia_get(
+      api_key = api_key,
+      api_path = "electricity/rto/fuel-type-data/data/",
+      data = "value",
+      frequency = "hourly",
+      facets = list(respondent = "SOCO"),
+      start = s, end = e, length = 5000
+    )
+  }
+  
+  do.call(rbind, chunks) %>%
+    mutate(time = as.POSIXct(period, format = "%Y-%m-%dT%H", tz = "UTC")) %>%
+    select(-period) %>%
+    arrange(time, fueltype) %>%
+    distinct(time, fueltype, .keep_all = TRUE)
+}
+
+soco_2024 <- pull_soco(2024, eia_key)
+soco_2025 <- pull_soco(2025, eia_key)
+
+nrow(soco_2024)
+range(soco_2024$time)
+nrow(soco_2025)
+range(soco_2025$time)
+
+
+
+# Now filtering is easy
+# temp <- soco_2024 %>% filter(date == "2024-07-15")
+# nrow(temp)
+
+# Seasonal comparisons
+# soco_2024 %>% filter(season == "Summer") %>% nrow()
+
+# Fuel types available:
+# NG (natural gas), COL (coal), NUC (nuclear), SUN (solar), WND (wind), WAT (hydro)
+
+# TODO: Validate modeled dispatch against actual 2024 hourly generation
+# TODO: Calculate monthly-varying emissions factors from actual fuel mix
+# TODO: Assess Vogtle 3+4 impact (Unit 3: July 2023, Unit 4: April 2024)
+
+# Alternative: GridStatus.io for visualization
+# Alternative: WattTime API for real-time marginal emissions
+# ============================================================================
+```
+add ing columns to datfaram
+
+
+```{r}
+add_time_cols <- function(df) {
+  df %>%
+    rename_with(~ gsub("-", "_", .x)) %>%   # type-name → type_name, etc.
+    mutate(
+      datetime_utc = time,
+      datetime_est = time - hours(5),
+      date     = as.Date(datetime_est),
+      year     = year(datetime_est),
+      month    = month(datetime_est),
+      month_name = month(datetime_est, label = TRUE),
+      hour_utc = hour(time),
+      hour_est = hour(datetime_est),
+      season   = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% 3:5  ~ "Spring",
+        month %in% 6:8  ~ "Summer",
+        month %in% 9:11 ~ "Fall"
+      )
+    )
+}
+
+soco_2024<-add_time_cols(soco_2024)
+soco_2025<-add_time_cols(soco_2025)
+
+```
+
+
+### Ploting 
+
+
+
+```{r}
+
+
+plot_soco <- function(df) {
+  yr <- year(min(df$time))
+  
+  # Time series faceted
+  p1 <- ggplot(df %>% filter(value > 0), 
+               aes(x = time, y = value, color = type_name)) +
+    geom_line(alpha = 0.3) +
+    facet_wrap(~type_name, scales = "free_y") +
+    labs(title = paste("SOCO Hourly Generation by Fuel Type —", yr),
+         y = "MWh", x = NULL) +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "none")
+  
+  # Stacked area daily
+  p2 <- df %>%
+    filter(value > 0) %>%
+    mutate(date = as.Date(time)) %>%
+    group_by(date, type_name) %>%
+    summarise(avg_mwh = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    ggplot(aes(x = date, y = avg_mwh, fill = type_name)) +
+    geom_area() +
+    scale_fill_viridis_d() +
+    labs(title = paste("SOCO Daily Average Generation Mix —", yr),
+         y = "Average MWh/hr", x = NULL, fill = "Fuel") +
+    theme_minimal(base_size = 13)
+  
+  # Diurnal profile
+  p3 <- df %>%
+    # mutate(hour = hour(time)) %>%
+    mutate(hour = hour_est) %>%
+    group_by(hour, type_name) %>%
+    summarise(avg_mwh = mean(value, na.rm = TRUE), .groups = "drop") %>%
+    ggplot(aes(x = hour, y = avg_mwh, fill = type_name)) +
+    geom_area() +
+    scale_x_continuous(breaks = seq(0, 23, 3)) +
+    scale_fill_viridis_d() +
+    labs(title = paste("SOCO Average Hourly Generation Profile —", yr),
+         subtitle = "Time of day (EST)",
+         y = "Average MWh", x = "Hour of Day (EST)", fill = "Fuel") +
+    theme_minimal(base_size = 13)
+  
+  print(p1)
+  print(p2)
+  print(p3)
+}
+
+plot_soco(soco_2024)
+plot_soco(soco_2025)
+
+```
+
 
 # 2. Parameters
 
