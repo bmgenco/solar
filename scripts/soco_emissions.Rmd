@@ -78,37 +78,94 @@ to validate or replace the IRP-based dispatch model above.
 
 eia_key <- Sys.getenv("EIA_API_KEY")
 
+
 pull_soco <- function(year, api_key) {
-  year_start <- as.Date(paste0(year, "-01-01"))
-  year_end   <- as.Date(paste0(year, "-12-31"))
+  year_start <- as.Date(paste0(year, "-01-01")) - 1
+  year_end   <- as.Date(paste0(year + 1, "-01-01"))
   starts <- seq(year_start, year_end, by = 20)
   
-  chunks <- list()
+  all_rows <- list()
   for (i in seq_along(starts)) {
     end_d <- min(starts[i] + 19, year_end)
     s <- paste0(format(starts[i], "%Y-%m-%d"), "T00")
     e <- paste0(format(end_d, "%Y-%m-%d"), "T23")
-    cat("Pulling", s, "to", e, "\n")
+    cat("Pulling", s, "to", e, "...")
     
-    chunks[[i]] <- eia_get(
-      api_key = api_key,
-      api_path = "electricity/rto/fuel-type-data/data/",
-      data = "value",
-      frequency = "hourly",
-      facets = list(respondent = "SOCO"),
-      start = s, end = e, length = 5000
+    url <- paste0(
+      "https://api.eia.gov/v2/electricity/rto/fuel-type-data/data/",
+      "?api_key=", api_key,
+      "&frequency=hourly&data[0]=value",
+      "&facets[respondent][]=SOCO",
+      "&start=", s, "&end=", e,
+      "&length=5000"
     )
+    r <- httr::GET(url)
+    dat <- httr::content(r)$response$data
+    cat(length(dat), "records\n")
+    
+    all_rows <- c(all_rows, dat)
   }
   
-  do.call(rbind, chunks) %>%
-    mutate(time = as.POSIXct(period, format = "%Y-%m-%dT%H", tz = "UTC")) %>%
+  bind_rows(lapply(all_rows, as.data.frame, stringsAsFactors = FALSE)) %>%
+    # rename_with(~ gsub("-", "_", .x)) %>%
+    rename_with(~ gsub("[-.]", "_", .x)) %>%
+    mutate(
+      value        = as.numeric(value),
+      time         = as.POSIXct(period, format = "%Y-%m-%dT%H", tz = "UTC"),
+      datetime_utc = time,
+      datetime_et  = with_tz(time, tzone = "America/New_York"),
+      date         = as.Date(datetime_et),
+      year         = year(datetime_et),
+      month        = month(datetime_et),
+      month_name   = month(datetime_et, label = TRUE),
+      hour_utc     = hour(time),
+      hour_et      = hour(datetime_et),
+      season       = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% 3:5  ~ "Spring",
+        month %in% 6:8  ~ "Summer",
+        month %in% 9:11 ~ "Fall"
+      )
+    ) %>%
     select(-period) %>%
     arrange(time, fueltype) %>%
-    distinct(time, fueltype, .keep_all = TRUE)
+    distinct(time, fueltype, .keep_all = TRUE) %>%
+    filter(year == !!year)
 }
 
-soco_2024 <- pull_soco(2024, eia_key)
-soco_2025 <- pull_soco(2025, eia_key)
+
+soco_2018<-pull_soco(2018, eia_key)
+soco_2019<-pull_soco(2019, eia_key)
+soco_2020<-pull_soco(2020, eia_key)
+soco_2021<-pull_soco(2021, eia_key)
+soco_2022<-pull_soco(2022, eia_key)
+soco_2023<-pull_soco(2023, eia_key)
+soco_2024<- pull_soco(2024, eia_key)
+soco_2025<- pull_soco(2025, eia_key)
+soco_2026<-pull_soco(2026, eia_key)
+# NEED to rmeiove empty records from 2026 & 2018 (July 2018–present)?. write a function that perhapsd oes
+
+# save these dat frames ian list, then pout as  r dat fiel to make it so I dotn need to dowlaod again
+# split by viotgle etc
+
+
+## Data Scope Notes
+
+### EIA-930 Historical Range
+# Pull full available record: July 2018–present (~7.5 years). This is the hard limit of EIA-930 availability — 10-year convention not achievable.
+# 
+# **Vogtle structural break — treat as two distinct regimes, not one continuous series:**
+# - Pre-Vogtle: 2018–2022
+# - Transition: 2023 (Unit 3 online July 2023)
+# - Post-Vogtle: 2024–present (Unit 4 online April 2024)
+# 
+# Pooling all years without stratification will misrepresent current dispatch — nuclear baseload increased ~15% with Vogtle. Stratify analyses by regime; do not use pooled averages across the break.
+# 
+# **Flag 2020 as outlier year** — COVID load anomaly affects dispatch patterns.
+# 
+# ENSO coverage is partial but includes 2020 La Niña and 2023 El Niño across the available record.
+
+
 
 nrow(soco_2024)
 range(soco_2024$time)
@@ -135,37 +192,6 @@ range(soco_2025$time)
 # Alternative: WattTime API for real-time marginal emissions
 # ============================================================================
 ```
-add ing columns to datfaram
-
-
-```{r}
-add_time_cols <- function(df) {
-  df %>%
-    rename_with(~ gsub("-", "_", .x)) %>%   # type-name → type_name, etc.
-    mutate(
-      datetime_utc = time,
-      datetime_est = time - hours(5),
-      date     = as.Date(datetime_est),
-      year     = year(datetime_est),
-      month    = month(datetime_est),
-      month_name = month(datetime_est, label = TRUE),
-      hour_utc = hour(time),
-      hour_est = hour(datetime_est),
-      season   = case_when(
-        month %in% c(12, 1, 2) ~ "Winter",
-        month %in% 3:5  ~ "Spring",
-        month %in% 6:8  ~ "Summer",
-        month %in% 9:11 ~ "Fall"
-      )
-    )
-}
-
-soco_2024<-add_time_cols(soco_2024)
-soco_2025<-add_time_cols(soco_2025)
-
-```
-
-
 ### Ploting 
 
 
@@ -174,11 +200,11 @@ soco_2025<-add_time_cols(soco_2025)
 
 
 plot_soco <- function(df) {
-  yr <- year(min(df$time))
+  yr <- first(df$year)
   
   # Time series faceted
   p1 <- ggplot(df %>% filter(value > 0), 
-               aes(x = time, y = value, color = type_name)) +
+               aes(x = datetime_et, y = value, color = type_name)) +
     geom_line(alpha = 0.3) +
     facet_wrap(~type_name, scales = "free_y") +
     labs(title = paste("SOCO Hourly Generation by Fuel Type —", yr),
@@ -189,7 +215,6 @@ plot_soco <- function(df) {
   # Stacked area daily
   p2 <- df %>%
     filter(value > 0) %>%
-    mutate(date = as.Date(time)) %>%
     group_by(date, type_name) %>%
     summarise(avg_mwh = mean(value, na.rm = TRUE), .groups = "drop") %>%
     ggplot(aes(x = date, y = avg_mwh, fill = type_name)) +
@@ -201,17 +226,15 @@ plot_soco <- function(df) {
   
   # Diurnal profile
   p3 <- df %>%
-    # mutate(hour = hour(time)) %>%
-    mutate(hour = hour_est) %>%
-    group_by(hour, type_name) %>%
+    group_by(hour_et, type_name) %>%
     summarise(avg_mwh = mean(value, na.rm = TRUE), .groups = "drop") %>%
-    ggplot(aes(x = hour, y = avg_mwh, fill = type_name)) +
+    ggplot(aes(x = hour_et, y = avg_mwh, fill = type_name)) +
     geom_area() +
     scale_x_continuous(breaks = seq(0, 23, 3)) +
     scale_fill_viridis_d() +
     labs(title = paste("SOCO Average Hourly Generation Profile —", yr),
-         subtitle = "Time of day (EST)",
-         y = "Average MWh", x = "Hour of Day (EST)", fill = "Fuel") +
+         subtitle = "Time of day (ET)",
+         y = "Average MWh", x = "Hour of Day (ET)", fill = "Fuel") +
     theme_minimal(base_size = 13)
   
   print(p1)

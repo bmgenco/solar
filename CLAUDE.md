@@ -1,10 +1,11 @@
 Residential solar+battery emissions analysis project.
 
 # Session Start
-1. Read [TODO.md](TODO.md) and [CHANGELOG.md](CHANGELOG.md).
+1. Read [docs/tasks.md](docs/tasks.md) and [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 # During Session
-- [NOTES.md](NOTES.md) has domain context if the need arises.
+- [docs/NOTES.md](docs/NOTES.md) has domain context if the need arises.
+- [docs/SOCO_emissions_project_strucuture.md](docs/SOCO_emissions_project_strucuture.md) has project phase plan, methodology decisions, and citations — read when starting a new phase or making architectural decisions.
 
 # Session End
 - Update CHANGELOG.md with what was done.
